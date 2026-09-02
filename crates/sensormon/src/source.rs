@@ -14,6 +14,8 @@ use std::sync::Arc;
 pub struct Block {
     pub samples: Vec<Iq>,
     pub dropped_before: u64,
+    /// RF center the SDR was tuned to when these samples were taken.
+    pub center_hz: f64,
 }
 
 /// Shared counters a source updates from its callback.
@@ -30,17 +32,24 @@ pub struct BlockSink {
     tx: SyncSender<Block>,
     counters: Arc<SourceCounters>,
     pending_drop: u64,
+    /// Current tuned center (f64 bits), written by whoever retunes the SDR.
+    center: Arc<AtomicU64>,
 }
 
 impl BlockSink {
-    pub fn new(tx: SyncSender<Block>, counters: Arc<SourceCounters>) -> Self {
-        BlockSink { tx, counters, pending_drop: 0 }
+    pub fn new(tx: SyncSender<Block>, counters: Arc<SourceCounters>, center: Arc<AtomicU64>) -> Self {
+        BlockSink { tx, counters, pending_drop: 0, center }
+    }
+
+    /// Handle to publish retunes through.
+    pub fn center_handle(&self) -> Arc<AtomicU64> {
+        self.center.clone()
     }
 
     pub fn push(&mut self, samples: Vec<Iq>, device_dropped: u64) {
         let n = samples.len() as u64;
         self.counters.device_dropped_samples.fetch_add(device_dropped, Ordering::Relaxed);
-        let block = Block { samples, dropped_before: self.pending_drop + device_dropped };
+        let block = Block { samples, dropped_before: self.pending_drop + device_dropped, center_hz: f64::from_bits(self.center.load(Ordering::Relaxed)) };
         match self.tx.try_send(block) {
             Ok(()) => {
                 self.pending_drop = 0;

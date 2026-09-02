@@ -168,6 +168,7 @@ impl IqSource for AirspySource {
             }
             api.check("set_rf_bias", (api.set_rf_bias)(dev, self.bias_tee as u8))?;
         }
+        sink.center_handle().store((self.center_hz as f64).to_bits(), std::sync::atomic::Ordering::Relaxed);
         let state = Box::into_raw(Box::new(CbState { sink }));
         // SAFETY: state outlives streaming (freed in stop after stop_rx).
         let rc = unsafe { (api.start_rx)(dev, on_transfer, state as *mut c_void) };

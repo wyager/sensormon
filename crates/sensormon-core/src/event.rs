@@ -81,6 +81,8 @@ pub enum Payload {
     Wh31l(Wh31l),
     #[serde(rename = "Fineoffset-WH25")]
     Wh25(Wh25),
+    #[serde(rename = "Toyota-TPMS")]
+    ToyotaTpms(ToyotaTpms),
 }
 
 impl Payload {
@@ -92,6 +94,7 @@ impl Payload {
             Payload::Wh55(_) => "Fineoffset-WH55",
             Payload::Wh31l(_) => "FineOffset-WH31L",
             Payload::Wh25(_) => "Fineoffset-WH25",
+            Payload::ToyotaTpms(_) => "Toyota-TPMS",
         }
     }
     /// The sensor's own identifier (width depends on the model).
@@ -102,6 +105,7 @@ impl Payload {
             Payload::Wh55(p) => p.id as u32,
             Payload::Wh31l(p) => p.id,
             Payload::Wh25(p) => p.id as u32,
+            Payload::ToyotaTpms(p) => p.id,
         }
     }
 }
@@ -192,4 +196,15 @@ pub enum Wh25Variant {
     Wh25,
     Wh32,
     Wh32b,
+}
+
+/// Toyota / Pacific Industries PMV-C210 tire pressure sensor (315 MHz in the US).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToyotaTpms {
+    /// 32-bit sensor id (rtl_433 prints 8 hex digits).
+    pub id: u32,
+    pub pressure_psi: f32,
+    pub temperature_c: f32,
+    /// Raw status byte (bit 7 = state flag, low 7 bits as transmitted).
+    pub status: u8,
 }

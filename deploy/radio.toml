@@ -9,7 +9,9 @@ gain = { lna = 12, mix = 12, vga = 12 }
 name = "garage-nesdr"
 kind = "rtlsdr"
 index = 0
-center_hz = 915_000_000
+# Time-multiplexed over the bands the Airspy does not cover: Toyota TPMS at 315 MHz, 433 MHz ISM.
+hop_hz = [315_000_000, 433_920_000]
+dwell_s = 15
 sample_rate = 2_400_000
 gain = 40.2
 

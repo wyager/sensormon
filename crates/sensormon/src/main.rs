@@ -128,7 +128,7 @@ fn run(config_path: &std::path::Path) -> Result<()> {
         let mut log_rx = events.subscribe();
         tokio::spawn(async move {
             while let Ok(ev) = log_rx.recv().await {
-                let rx: Vec<String> = ev.reception.heard_by.iter().map(|(r, s)| format!("{r}:snr{:.0}", s.snr.0)).collect();
+                let rx: Vec<String> = ev.reception.heard_by.iter().map(|(r, s)| format!("{r}@{:.3}M:snr{:.0}", s.center.0 / 1e6, s.snr.0)).collect();
                 eprintln!("{} {} {:06x} [{}]", ev.reception.time.format("%H:%M:%S%.3f"), ev.sensor.model(), ev.sensor.sensor_id(), rx.join(","));
             }
         });

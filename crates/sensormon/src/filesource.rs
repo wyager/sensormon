@@ -15,6 +15,7 @@ pub struct FileSource {
     pub sample_rate: u32,
     pub realtime: bool,
     pub block: usize,
+    pub center_hz: f64,
 }
 
 struct Running {
@@ -38,6 +39,7 @@ impl IqSource for FileSource {
 
     fn start(self: Box<Self>, mut sink: BlockSink) -> Result<Box<dyn RunningSource>> {
         let mut reader = Reader::open(&self.path, self.format)?;
+        sink.center_handle().store(self.center_hz.to_bits(), std::sync::atomic::Ordering::Relaxed);
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = stop.clone();
         let thread = std::thread::Builder::new().name("file-source".into()).spawn(move || {

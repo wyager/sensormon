@@ -7,7 +7,7 @@ use crate::dsp::fsk::{demod_fsk, FskParams};
 use crate::dsp::ring::SampleRing;
 use crate::dsp::Iq;
 use crate::event::{ReceiverEvent, ReceiverId, Signal};
-use crate::protocol::{decode_all, Decoder};
+use crate::protocol::{decode_all, decoders_for_rate, symbol_rates, Decoder};
 use crate::units::{Hertz, SampleIndex, SampleRate};
 use chrono::{DateTime, Duration, Utc};
 use crate::dsp::fsk::Symbols;
@@ -124,20 +124,40 @@ impl Pipeline {
             return Vec::new();
         };
         tr.extracted = true;
-        let Some(sym) = demod_fsk(&bb, &self.cfg.fsk) else {
-            return Vec::new();
-        };
-        self.stats.demodulated += 1;
-        if self.trace {
-            let inv = crate::bits::inverted(&sym.bits);
-            tr.syncs = crate::protocol::fineoffset::frame_starts(&sym.bits).len() + crate::protocol::fineoffset::frame_starts(&inv).len();
-            tr.symbols = Some(sym.clone());
+        // One demodulation pass per distinct symbol rate the decoders need.
+        let mut out = Vec::new();
+        let mut any_demod = false;
+        for rate in symbol_rates(&self.decoders) {
+            let params = FskParams { symbol_rate: rate, ..self.cfg.fsk };
+            let Some(sym) = demod_fsk(&bb, &params) else { continue };
+            any_demod = true;
+            if self.trace && tr.symbols.is_none() {
+                let inv = crate::bits::inverted(&sym.bits);
+                tr.syncs = crate::protocol::fineoffset::frame_starts(&sym.bits).len() + crate::protocol::fineoffset::frame_starts(&inv).len();
+                tr.symbols = Some(sym.clone());
+            }
+            let signal = Signal { center: bb.center, f_mark: sym.f_mark, f_space: sym.f_space, symbol_rate: sym.symbol_rate, rssi: sym.rssi, snr: sym.snr, noise: sym.noise };
+            let time = self.time_of(sym.t0);
+            let decoded = decode_all(&decoders_for_rate(&self.decoders, rate), &sym.bits);
+            self.stats.decoded_frames += decoded.len() as u64;
+            tr.frames += decoded.len();
+            out.extend(decoded.into_iter().map(|d| ReceiverEvent { receiver: self.receiver.clone(), time, signal, sensor: d.payload, raw: d.raw }));
         }
-        let signal = Signal { center: bb.center, f_mark: sym.f_mark, f_space: sym.f_space, symbol_rate: sym.symbol_rate, rssi: sym.rssi, snr: sym.snr, noise: sym.noise };
-        let time = self.time_of(sym.t0);
-        let decoded = decode_all(&self.decoders, &sym.bits);
-        self.stats.decoded_frames += decoded.len() as u64;
-        tr.frames = decoded.len();
-        decoded.into_iter().map(|d| ReceiverEvent { receiver: self.receiver.clone(), time, signal, sensor: d.payload, raw: d.raw }).collect()
+        if any_demod {
+            self.stats.demodulated += 1;
+        }
+        out
+    }
+
+    /// The stream skipped `n` samples (dropped, or this pipeline's band was not
+    /// being received while the SDR was tuned elsewhere): keep the sample
+    /// clock and wall-clock anchor honest.
+    pub fn skip_samples(&mut self, n: u64, now: DateTime<Utc>) {
+        self.next_index = self.next_index.offset(n as i64);
+        self.anchor(self.next_index, now);
+    }
+
+    pub fn next_index(&self) -> SampleIndex {
+        self.next_index
     }
 }

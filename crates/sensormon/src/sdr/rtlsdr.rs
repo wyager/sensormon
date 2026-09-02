@@ -65,7 +65,9 @@ impl Api {
 
 pub struct RtlsdrSource {
     pub index: u32,
-    pub center_hz: u32,
+    /// Centers to cycle through; a single entry means no hopping.
+    pub centers_hz: Vec<u32>,
+    pub dwell: std::time::Duration,
     pub sample_rate: u32,
     pub gain: RtlsdrGain,
     pub bias_tee: bool,
@@ -86,6 +88,7 @@ struct Running {
     api: Api,
     dev: DevPtr,
     thread: Option<JoinHandle<()>>,
+    hopper: Option<(Arc<std::sync::atomic::AtomicBool>, JoinHandle<()>)>,
     state: *mut CbState,
 }
 
@@ -97,6 +100,10 @@ unsafe impl Send for Running {}
 
 impl RunningSource for Running {
     fn stop(mut self: Box<Self>) {
+        if let Some((flag, t)) = self.hopper.take() {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = t.join();
+        }
         // SAFETY: cancel_async makes read_async return on its thread; then close and free.
         unsafe {
             (self.api.cancel_async)(self.dev.0);
@@ -113,7 +120,7 @@ impl RunningSource for Running {
 
 impl IqSource for RtlsdrSource {
     fn describe(&self) -> String {
-        format!("rtlsdr index={} {} Hz @ {} S/s", self.index, self.center_hz, self.sample_rate)
+        format!("rtlsdr index={} centers={:?} Hz dwell={:?} @ {} S/s", self.index, self.centers_hz, self.dwell, self.sample_rate)
     }
 
     fn start(self: Box<Self>, sink: BlockSink) -> Result<Box<dyn RunningSource>> {
@@ -123,7 +130,7 @@ impl IqSource for RtlsdrSource {
         unsafe {
             Api::check("rtlsdr_open", (api.open)(&mut dev, self.index))?;
             Api::check("set_sample_rate", (api.set_sample_rate)(dev, self.sample_rate))?;
-            Api::check("set_center_freq", (api.set_center_freq)(dev, self.center_hz))?;
+            Api::check("set_center_freq", (api.set_center_freq)(dev, self.centers_hz[0]))?;
             match self.gain {
                 RtlsdrGain::Auto(_) => {
                     Api::check("set_tuner_gain_mode", (api.set_tuner_gain_mode)(dev, 0))?;
@@ -138,10 +145,46 @@ impl IqSource for RtlsdrSource {
             let _ = (api.set_bias_tee)(dev, self.bias_tee as c_int); // absent on old builds; not fatal
             Api::check("reset_buffer", (api.reset_buffer)(dev))?;
         }
+        let center_handle = sink.center_handle();
+        center_handle.store((self.centers_hz[0] as f64).to_bits(), std::sync::atomic::Ordering::Relaxed);
         let state = Box::into_raw(Box::new(CbState { sink }));
         let dev = DevPtr(dev);
         let api2 = api.clone();
         let state_ptr = StatePtr(state);
+        // Frequency hopper: retune every `dwell` and publish the new center so
+        // blocks are tagged (the runtime discards a settle window after each hop).
+        let hopper = if self.centers_hz.len() > 1 {
+            let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag2 = flag.clone();
+            let api3 = api.clone();
+            let centers = self.centers_hz.clone();
+            let dwell = self.dwell;
+            let t = std::thread::Builder::new().name("rtlsdr-hop".into()).spawn(move || {
+                let dev = dev;
+                let mut i = 0usize;
+                loop {
+                    let deadline = std::time::Instant::now() + dwell;
+                    while std::time::Instant::now() < deadline {
+                        if flag2.load(std::sync::atomic::Ordering::Relaxed) {
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    i = (i + 1) % centers.len();
+                    // SAFETY: librtlsdr permits retuning while read_async runs (rtl_433 hops this way).
+                    let rc = unsafe { (api3.set_center_freq)(dev.0, centers[i]) };
+                    if rc == 0 {
+                        center_handle.store((centers[i] as f64).to_bits(), std::sync::atomic::Ordering::Relaxed);
+                        eprintln!("rtlsdr: retuned to {} Hz", centers[i]);
+                    } else {
+                        eprintln!("rtlsdr: retune to {} failed ({rc})", centers[i]);
+                    }
+                }
+            })?;
+            Some((flag, t))
+        } else {
+            None
+        };
         let thread = std::thread::Builder::new().name("rtlsdr-usb".into()).spawn(move || {
             // move the whole Send wrappers in (edition-2021 closures would otherwise capture just the raw pointer fields)
             let (dev, state_ptr) = (dev, state_ptr);
@@ -151,7 +194,7 @@ impl IqSource for RtlsdrSource {
                 eprintln!("rtlsdr_read_async returned {rc}");
             }
         })?;
-        Ok(Box::new(Running { api, dev, thread: Some(thread), state }))
+        Ok(Box::new(Running { api, dev, thread: Some(thread), hopper, state }))
     }
 }
 

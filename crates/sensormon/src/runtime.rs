@@ -12,6 +12,7 @@ use sensormon_core::merge::Merger;
 use sensormon_core::pipeline::{Pipeline, PipelineConfig, PipelineStats};
 use sensormon_core::{Event, Hertz, ReceiverEvent, ReceiverId, SampleIndex, SampleRate};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -24,7 +25,8 @@ pub struct ReceiverStatus {
     pub name: String,
     pub source: String,
     pub sample_rate: u32,
-    pub center_hz: f64,
+    pub centers_hz: Vec<f64>,
+    pub current_center_hz: f64,
     pub blocks: u64,
     pub samples: u64,
     pub dropped_blocks: u64,
@@ -50,9 +52,9 @@ struct ReceiverHandle {
     name: String,
     source_desc: String,
     sample_rate: u32,
-    center_hz: f64,
+    centers_hz: Vec<f64>,
     counters: Arc<SourceCounters>,
-    stats: Arc<Mutex<PipelineStats>>,
+    stats: Arc<Mutex<(PipelineStats, f64)>>,
     running: Option<Box<dyn RunningSource>>,
 }
 
@@ -65,9 +67,9 @@ fn make_source(rc: &ReceiverConfig) -> Result<Box<dyn IqSource>> {
     Ok(match &rc.kind {
         ReceiverKind::Airspy { serial, gain, bias_tee } => {
             let serial = serial.as_ref().map(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16)).transpose().context("airspy serial must be hex")?;
-            Box::new(AirspySource { serial, center_hz: rc.center_hz as u32, sample_rate: rc.sample_rate, gain: *gain, bias_tee: *bias_tee })
+            Box::new(AirspySource { serial, center_hz: rc.centers()[0] as u32, sample_rate: rc.sample_rate, gain: *gain, bias_tee: *bias_tee })
         }
-        ReceiverKind::Rtlsdr { index, gain, bias_tee } => Box::new(RtlsdrSource { index: *index, center_hz: rc.center_hz as u32, sample_rate: rc.sample_rate, gain: *gain, bias_tee: *bias_tee }),
+        ReceiverKind::Rtlsdr { index, gain, bias_tee } => Box::new(RtlsdrSource { index: *index, centers_hz: rc.centers().iter().map(|c| *c as u32).collect(), dwell: Duration::from_secs_f64(rc.dwell_s), sample_rate: rc.sample_rate, gain: *gain, bias_tee: *bias_tee }),
         ReceiverKind::File { path, format, realtime } => Box::new(FileSource {
             path: path.into(),
             format: match format {
@@ -77,6 +79,7 @@ fn make_source(rc: &ReceiverConfig) -> Result<Box<dyn IqSource>> {
             sample_rate: rc.sample_rate,
             realtime: *realtime,
             block: 65536,
+            center_hz: rc.centers()[0],
         }),
     })
 }
@@ -95,35 +98,67 @@ impl Runtime {
             let source_desc = source.describe();
             let (block_tx, block_rx) = mpsc::sync_channel::<Block>(64);
             let counters = Arc::new(SourceCounters::default());
-            let stats = Arc::new(Mutex::new(PipelineStats::default()));
+            let stats = Arc::new(Mutex::new((PipelineStats::default(), 0.0f64)));
             let rate = SampleRate(rc.sample_rate);
-            let mut pipeline = Pipeline::new(ReceiverId(rc.name.clone()), rate, Hertz(rc.center_hz), PipelineConfig::default(), Utc::now());
+            let receiver_id = ReceiverId(rc.name.clone());
             let stats2 = stats.clone();
             let ev_tx = rx_events_tx.clone();
             let name = rc.name.clone();
+            // Samples to discard after a retune while the PLL settles and the old band's tail flushes.
+            let settle = rate.samples_in(0.06) as u64;
             std::thread::Builder::new().name(format!("rx-{name}")).spawn(move || {
-                let mut index = SampleIndex(0);
+                // One pipeline per band the receiver visits (lazily created); each keeps
+                // its own noise floor and sample clock. `global` counts every sample the
+                // SDR produced, so a band's pipeline can skip forward over the time it
+                // wasn't being received.
+                let mut pipelines: HashMap<u64, (Pipeline, SampleIndex)> = HashMap::new();
+                let mut global = SampleIndex(0);
+                let mut current: Option<u64> = None;
+                let mut settle_left: u64 = 0;
                 let mut blocks: u64 = 0;
                 while let Ok(block) = block_rx.recv() {
-                    if block.dropped_before > 0 {
-                        // keep the sample clock honest: skip the index forward over what was lost
-                        index = index.offset(block.dropped_before as i64);
-                        pipeline.anchor(index, Utc::now());
+                    global = global.offset(block.dropped_before as i64);
+                    let key = block.center_hz.to_bits();
+                    if current != Some(key) {
+                        current = Some(key);
+                        settle_left = settle;
                     }
-                    if blocks.is_multiple_of(64) {
-                        pipeline.anchor(index, Utc::now() - chrono::Duration::milliseconds((block.samples.len() as f64 / rate.hz() * 1e3) as i64));
+                    let n = block.samples.len() as u64;
+                    if settle_left > 0 {
+                        settle_left = settle_left.saturating_sub(n);
+                        global = global.offset(n as i64);
+                        continue;
+                    }
+                    let (pipeline, seen_upto) = pipelines.entry(key).or_insert_with(|| (Pipeline::new(receiver_id.clone(), rate, Hertz(block.center_hz), PipelineConfig::default(), Utc::now()), global));
+                    let gap = seen_upto.distance_to(global);
+                    if gap > 0 {
+                        pipeline.skip_samples(gap, Utc::now());
+                    }
+                    if blocks % 64 == 0 {
+                        pipeline.anchor(pipeline.next_index(), Utc::now() - chrono::Duration::milliseconds((n as f64 / rate.hz() * 1e3) as i64));
                     }
                     for ev in pipeline.push(&block.samples) {
                         let _ = ev_tx.send(ev);
                     }
-                    index = index.offset(block.samples.len() as i64);
+                    global = global.offset(n as i64);
+                    *seen_upto = global;
                     blocks += 1;
-                    *stats2.lock().unwrap() = pipeline.stats();
+                    let mut total = PipelineStats::default();
+                    for (p, _) in pipelines.values() {
+                        let st = p.stats();
+                        total.samples += st.samples;
+                        total.bursts += st.bursts;
+                        total.bursts_lost_from_ring += st.bursts_lost_from_ring;
+                        total.demodulated += st.demodulated;
+                        total.decoded_frames += st.decoded_frames;
+                    }
+                    *stats2.lock().unwrap() = (total, block.center_hz);
                 }
             })?;
-            let running = source.start(BlockSink::new(block_tx, counters.clone())).with_context(|| format!("start receiver {}", rc.name))?;
+            let center = Arc::new(std::sync::atomic::AtomicU64::new(rc.centers()[0].to_bits()));
+            let running = source.start(BlockSink::new(block_tx, counters.clone(), center)).with_context(|| format!("start receiver {}", rc.name))?;
             eprintln!("receiver {}: {}", rc.name, source_desc);
-            receivers.push(ReceiverHandle { name: rc.name.clone(), source_desc, sample_rate: rc.sample_rate, center_hz: rc.center_hz, counters, stats, running: Some(running) });
+            receivers.push(ReceiverHandle { name: rc.name.clone(), source_desc, sample_rate: rc.sample_rate, centers_hz: rc.centers(), counters, stats, running: Some(running) });
         }
         drop(rx_events_tx);
         // merger thread
@@ -148,17 +183,21 @@ impl Runtime {
     pub fn status(&self) -> Vec<ReceiverStatus> {
         self.receivers
             .iter()
-            .map(|r| ReceiverStatus {
+            .map(|r| {
+                // one lock: the (stats, center) tuple is Copy
+                let (ps, center) = *r.stats.lock().unwrap();
+                ReceiverStatus {
                 name: r.name.clone(),
                 source: r.source_desc.clone(),
                 sample_rate: r.sample_rate,
-                center_hz: r.center_hz,
+                centers_hz: r.centers_hz.clone(),
+                current_center_hz: center,
                 blocks: r.counters.blocks.load(Ordering::Relaxed),
                 samples: r.counters.samples.load(Ordering::Relaxed),
                 dropped_blocks: r.counters.dropped_blocks.load(Ordering::Relaxed),
                 device_dropped_samples: r.counters.device_dropped_samples.load(Ordering::Relaxed),
-                pipeline: (*r.stats.lock().unwrap()).into(),
-            })
+                pipeline: ps.into(),
+            }})
             .collect()
     }
 

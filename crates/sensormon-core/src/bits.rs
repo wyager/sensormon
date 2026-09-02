@@ -34,6 +34,64 @@ pub fn to_bits(bytes: &[u8]) -> Vec<bool> {
     (0..bytes.len() * 8).map(|i| bit_at(bytes, i)).collect()
 }
 
+/// Differential Manchester decode starting at bit `start`, at most `max_bits`
+/// output bits. Exact port of rtl_433's `bitbuffer_differential_manchester_decode`:
+/// the first long pulse sets the clock; thereafter each data bit is two raw
+/// bits, equal raw bits = 1, differing = 0; a missing clock transition ends it.
+/// Returns (decoded bits, raw position reached).
+pub fn differential_manchester_decode(bits: &[bool], start: usize, max_bits: usize) -> (Vec<bool>, usize) {
+    let len = bits.len().min(if max_bits > 0 { start + max_bits * 2 } else { usize::MAX });
+    let mut out = Vec::with_capacity(max_bits);
+    let mut ipos = start;
+    let mut bit2 = false;
+    while ipos < len {
+        let bit1 = bits[ipos];
+        ipos += 1;
+        bit2 = *bits.get(ipos).unwrap_or(&false);
+        ipos += 1;
+        let bit3 = *bits.get(ipos).unwrap_or(&false);
+        if bit1 != bit2 {
+            if bit2 != bit3 {
+                out.push(false);
+            } else {
+                bit2 = bit1;
+                ipos -= 1;
+                break;
+            }
+        } else {
+            bit2 = !bit1;
+            ipos -= 2;
+            break;
+        }
+    }
+    while ipos < len {
+        let bit1 = bits[ipos];
+        ipos += 1;
+        if bit1 == bit2 {
+            break; // clock missing
+        }
+        bit2 = *bits.get(ipos).unwrap_or(&false);
+        ipos += 1;
+        out.push(bit1 == bit2);
+    }
+    (out, ipos)
+}
+
+/// Differential Manchester encode (test helper / inverse of the decoder):
+/// every bit period starts with a transition; a `0` has a mid-bit transition, a `1` none.
+pub fn differential_manchester_encode(data: &[bool], mut level: bool) -> Vec<bool> {
+    let mut out = Vec::with_capacity(data.len() * 2);
+    for &d in data {
+        level = !level; // clock transition at bit start
+        out.push(level);
+        if !d {
+            level = !level; // mid-bit transition for 0
+        }
+        out.push(level);
+    }
+    out
+}
+
 /// Flip every bit (FSK tone polarity is not knowable a priori).
 pub fn inverted(bits: &[bool]) -> Vec<bool> {
     bits.iter().map(|b| !b).collect()
@@ -55,5 +113,13 @@ mod tests {
         assert_eq!(find_pattern(&shifted, &[0x2d, 0xd4], 16, 0), Some(11));
         assert_eq!(extract_bytes(&shifted, 11, 3).unwrap(), [0x2d, 0xd4, 0x51]);
         assert_eq!(extract_bytes(&bits, 30, 2), None);
+    }
+
+    #[test]
+    fn differential_manchester_roundtrip() {
+        let data = to_bits(&[0xd9, 0x61, 0x05, 0xf2, 0x3a, 0x5c, 0x00, 0xc5, 0x77]);
+        let raw = differential_manchester_encode(&data, false);
+        let (dec, _) = differential_manchester_decode(&raw, 0, 80);
+        assert_eq!(dec, data);
     }
 }

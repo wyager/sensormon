@@ -1,6 +1,7 @@
 //! Protocol decoders: pure functions from demodulated bits to typed payloads.
 
 pub mod fineoffset;
+pub mod toyota_tpms;
 pub mod wh25;
 pub mod wh31l;
 pub mod wh51;
@@ -58,12 +59,30 @@ pub fn decoders() -> Vec<Box<dyn Decoder>> {
         Box::new(wh55::Wh55Decoder),
         Box::new(wh31l::Wh31lDecoder),
         Box::new(wh25::Wh25Decoder),
+        Box::new(toyota_tpms::ToyotaTpmsDecoder),
     ]
+}
+
+/// Distinct FSK symbol rates the given decoders need (one demod pass each).
+pub fn symbol_rates(decoders: &[Box<dyn Decoder>]) -> Vec<Hertz> {
+    let mut rates: Vec<Hertz> = Vec::new();
+    for d in decoders {
+        let Modulation::Fsk { symbol_rate } = d.modulation();
+        if !rates.iter().any(|r| (r.0 - symbol_rate.0).abs() < 1.0) {
+            rates.push(symbol_rate);
+        }
+    }
+    rates
+}
+
+/// Decoders that want this symbol rate.
+pub fn decoders_for_rate<'a>(decoders: &'a [Box<dyn Decoder>], rate: Hertz) -> Vec<&'a Box<dyn Decoder>> {
+    decoders.iter().filter(|d| matches!(d.modulation(), Modulation::Fsk { symbol_rate } if (symbol_rate.0 - rate.0).abs() < 1.0)).collect()
 }
 
 /// Run every decoder over the bits and over their inversion, de-duplicating
 /// identical frames (a frame that decodes in both polarities is one frame).
-pub fn decode_all(decoders: &[Box<dyn Decoder>], bits: &[bool]) -> Vec<Decoded> {
+pub fn decode_all(decoders: &[&Box<dyn Decoder>], bits: &[bool]) -> Vec<Decoded> {
     let inv = bits::inverted(bits);
     let mut out: Vec<Decoded> = Vec::new();
     for (inverted, b) in [(false, bits), (true, &inv[..])] {

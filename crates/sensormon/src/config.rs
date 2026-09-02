@@ -20,8 +20,30 @@ pub struct ReceiverConfig {
     pub name: String,
     #[serde(flatten)]
     pub kind: ReceiverKind,
-    pub center_hz: f64,
+    /// Center frequency; with `hop_hz` this is ignored in favour of the list.
+    #[serde(default)]
+    pub center_hz: Option<f64>,
+    /// Frequencies to cycle through (time-multiplexed), each for `dwell_s`.
+    #[serde(default)]
+    pub hop_hz: Vec<f64>,
+    #[serde(default = "default_dwell")]
+    pub dwell_s: f64,
     pub sample_rate: u32,
+}
+
+fn default_dwell() -> f64 {
+    15.0
+}
+
+impl ReceiverConfig {
+    /// The centers this receiver visits, in order.
+    pub fn centers(&self) -> Vec<f64> {
+        if !self.hop_hz.is_empty() {
+            self.hop_hz.clone()
+        } else {
+            self.center_hz.into_iter().collect()
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,6 +135,14 @@ pub fn load(path: &Path) -> Result<Config> {
     let cfg: Config = toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
     if cfg.receivers.is_empty() {
         anyhow::bail!("no [[receiver]] entries");
+    }
+    for r in &cfg.receivers {
+        if r.centers().is_empty() {
+            anyhow::bail!("receiver {}: give center_hz or hop_hz", r.name);
+        }
+        if r.hop_hz.len() > 1 && !matches!(r.kind, ReceiverKind::Rtlsdr { .. }) {
+            anyhow::bail!("receiver {}: hopping is only implemented for rtlsdr", r.name);
+        }
     }
     Ok(cfg)
 }
