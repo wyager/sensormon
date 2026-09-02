@@ -106,6 +106,7 @@ fn main() -> Result<()> {
             let s = pipeline.stats();
             let secs = rate.seconds_of(s.samples);
             eprintln!("{:.1}s of samples in {:.1}s wall; bursts={} demodulated={} frames={} lost_from_ring={}", secs, t_start.elapsed().as_secs_f64(), s.bursts, s.demodulated, s.decoded_frames, s.bursts_lost_from_ring);
+            eprintln!("stage time: detect {:.2}s  extract {:.2}s  demod {:.2}s  decode {:.2}s", s.ns_detect as f64 / 1e9, s.ns_extract as f64 / 1e9, s.ns_demod as f64 / 1e9, s.ns_decode as f64 / 1e9);
             for (k, v) in counts {
                 println!("{v:4}  {k}");
             }

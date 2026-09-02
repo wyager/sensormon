@@ -1,6 +1,6 @@
 //! Fineoffset WH55 leak sensor: 9 bytes from the family byte (0x55), CRC over 9 == 0.
 
-use super::{fineoffset, Decoded, Decoder, FrameError, Modulation};
+use super::{fineoffset, Band, Decoded, Decoder, FrameError, Modulation, FINEOFFSET_BANDS};
 use crate::crc::crc8_fineoffset;
 use crate::event::{Payload, Wh55};
 
@@ -34,6 +34,9 @@ impl Decoder for Wh55Decoder {
     }
     fn modulation(&self) -> Modulation {
         Modulation::Fsk { symbol_rate: fineoffset::SYMBOL_RATE }
+    }
+    fn bands(&self) -> &'static [Band] {
+        FINEOFFSET_BANDS
     }
     fn decode(&self, bits: &[bool]) -> Vec<Decoded> {
         fineoffset::frame_starts(bits)

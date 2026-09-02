@@ -48,6 +48,8 @@ pub struct Symbols {
 
 /// Find the two strongest tones in the burst. Returns (space, mark) in Hz relative to baseband DC.
 fn find_tones(bb: &Baseband, p: &FskParams) -> Option<(f64, f64, Db, Db)> {
+    // 8192 points is ~30 Hz bins at 250 kS/s: ample for locating tones, and
+    // bounded cost on long bursts (only the first n samples are used).
     let n = bb.iq.len().next_power_of_two().clamp(256, 65536);
     let mut buf: Vec<Complex<f32>> = vec![Complex::new(0.0, 0.0); n];
     let m = bb.iq.len().min(n);
@@ -133,15 +135,18 @@ fn fit_lattice(crossings: &[f32], nominal_period: f32, max_err: f32) -> Option<(
     if crossings.len() < 6 {
         return None;
     }
-    let span = crossings[crossings.len() - 1] - crossings[0];
-    // step fine enough that accumulated phase error over the burst stays < 0.05 symbol
-    let rel_step = (0.05 * nominal_period / span.max(nominal_period)).clamp(1e-5, 1e-3);
+    // Coarse estimate from the first crossings only (bounded cost on long
+    // bursts); the least-squares refinement below uses all of them.
+    let coarse = &crossings[..];
+    let span = coarse[coarse.len() - 1] - coarse[0];
+    // step fine enough that accumulated phase error over `coarse` stays < 0.05 symbol
+    let rel_step = (0.05 * nominal_period / span.max(nominal_period)).clamp(1e-4, 1e-3);
     let steps = (2.0 * max_err / rel_step).ceil() as i32;
     let mut best = (0.0f32, nominal_period, -1.0f32);
     for i in -steps..=steps {
         let period = nominal_period * (1.0 + i as f32 * rel_step);
         let (mut re, mut im) = (0.0f32, 0.0f32);
-        for &t in crossings {
+        for &t in coarse {
             let a = 2.0 * PI * t / period;
             re += a.cos();
             im += a.sin();
@@ -192,8 +197,28 @@ fn fit_lattice(crossings: &[f32], nominal_period: f32, max_err: f32) -> Option<(
     Some((phase, period))
 }
 
+/// The tone pair of a burst (independent of symbol rate), so it can be found
+/// once and reused for every symbol rate the decoders need.
+#[derive(Clone, Copy, Debug)]
+pub struct Tones {
+    pub f_space: f64,
+    pub f_mark: f64,
+    pub peak: Db,
+    pub noise: Db,
+}
+
+pub fn find_tone_pair(bb: &Baseband, p: &FskParams) -> Option<Tones> {
+    find_tones(bb, p).map(|(f_space, f_mark, peak, noise)| Tones { f_space, f_mark, peak, noise })
+}
+
 pub fn demod_fsk(bb: &Baseband, p: &FskParams) -> Option<Symbols> {
-    let (f_space, f_mark, peak, noise) = find_tones(bb, p)?;
+    let tones = find_tone_pair(bb, p)?;
+    demod_fsk_with_tones(bb, p, tones)
+}
+
+/// Demodulate at `p.symbol_rate` given an already-located tone pair.
+pub fn demod_fsk_with_tones(bb: &Baseband, p: &FskParams, tones: Tones) -> Option<Symbols> {
+    let Tones { f_space, f_mark, peak, noise } = tones;
     let fs = bb.sample_rate.hz();
     // floor, not round: a window shorter than a symbol costs a little SNR, longer causes ISI
     let sym_len = (fs / p.symbol_rate.0).floor().max(2.0) as usize;
@@ -202,9 +227,12 @@ pub fn demod_fsk(bb: &Baseband, p: &FskParams) -> Option<Symbols> {
     let d: Vec<f32> = e_mark.iter().zip(&e_space).map(|(m, s)| (m - s) / (m + s + 1e-9)).collect();
     // burst "on" region: where either tone energy is well above the noise-only level
     let e_tot: Vec<f32> = e_mark.iter().zip(&e_space).map(|(m, s)| m.max(*s)).collect();
-    let mut sorted = e_tot.clone();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let on_thresh = sorted[sorted.len() / 10] * 3.0 + sorted[sorted.len() * 9 / 10] * 0.2;
+    let pct = |q: usize| {
+        let mut v = e_tot.clone();
+        let k = (v.len() * q / 10).min(v.len() - 1);
+        *v.select_nth_unstable_by(k, |a, b| a.partial_cmp(b).unwrap()).1
+    };
+    let on_thresh = pct(1) * 3.0 + pct(9) * 0.2;
     let on: Vec<bool> = e_tot.iter().map(|&e| e > on_thresh).collect();
     let first_on = on.iter().position(|&b| b)?;
     let last_on = on.iter().rposition(|&b| b)?;

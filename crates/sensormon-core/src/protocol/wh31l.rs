@@ -1,7 +1,7 @@
 //! Fineoffset WH57 lightning sensor (rtl_433: FineOffset-WH31L): 9 bytes from
 //! family byte 0x57, CRC over 8 == 0, byte 8 = sum of first 8.
 
-use super::{fineoffset, Decoded, Decoder, FrameError, Modulation};
+use super::{fineoffset, Band, Decoded, Decoder, FrameError, Modulation, FINEOFFSET_BANDS};
 use crate::crc::{crc8_fineoffset, sum8};
 use crate::event::{LightningState, Payload, Wh31l};
 
@@ -43,6 +43,9 @@ impl Decoder for Wh31lDecoder {
     }
     fn modulation(&self) -> Modulation {
         Modulation::Fsk { symbol_rate: fineoffset::SYMBOL_RATE }
+    }
+    fn bands(&self) -> &'static [Band] {
+        FINEOFFSET_BANDS
     }
     fn decode(&self, bits: &[bool]) -> Vec<Decoded> {
         fineoffset::frame_starts(bits)

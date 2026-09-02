@@ -2,13 +2,15 @@
 //! 14-bit sync then 72 bits differential-Manchester data (9 bytes), CRC-8
 //! poly 0x07 init 0x80. Ported from rtl_433 `devices/tpms_toyota.c`.
 
-use super::{Decoded, Decoder, FrameError, Modulation};
+use super::{Band, Decoded, Decoder, FrameError, Modulation};
 use crate::bits::{differential_manchester_decode, find_pattern};
 use crate::crc::crc8;
 use crate::event::{Payload, ToyotaTpms};
 use crate::units::Hertz;
 
 pub const SYMBOL_RATE: Hertz = Hertz(1e6 / 52.0);
+/// 315 MHz in North America / Japan; 433.92 MHz for European cars.
+const TPMS_BANDS: &[Band] = &[Band::mhz(315.0, 2.0), Band::mhz(433.92, 2.0)];
 /// 12 bits of the sync (`…1 0101 0011 11` → 0xa9e0); the last bit is handed to the DM decoder.
 const SYNC: [u8; 2] = [0xa9, 0xe0];
 
@@ -41,6 +43,9 @@ impl Decoder for ToyotaTpmsDecoder {
     }
     fn modulation(&self) -> Modulation {
         Modulation::Fsk { symbol_rate: SYMBOL_RATE }
+    }
+    fn bands(&self) -> &'static [Band] {
+        TPMS_BANDS
     }
     fn decode(&self, bits: &[bool]) -> Vec<Decoded> {
         let mut out = Vec::new();

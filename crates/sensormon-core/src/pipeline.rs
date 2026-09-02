@@ -3,11 +3,11 @@
 
 use crate::dsp::burst::{Burst, BurstDetector, BurstDetectorConfig};
 use crate::dsp::extract::{extract, ExtractConfig};
-use crate::dsp::fsk::{demod_fsk, FskParams};
+use crate::dsp::fsk::{demod_fsk_with_tones, find_tone_pair, FskParams};
 use crate::dsp::ring::SampleRing;
 use crate::dsp::Iq;
 use crate::event::{ReceiverEvent, ReceiverId, Signal};
-use crate::protocol::{decode_all, decoders_for_rate, symbol_rates, Decoder};
+use crate::protocol::{decode_all, decoders_for_center, decoders_for_rate, symbol_rates, Decoder};
 use crate::units::{Hertz, SampleIndex, SampleRate};
 use chrono::{DateTime, Duration, Utc};
 use crate::dsp::fsk::Symbols;
@@ -35,6 +35,11 @@ pub struct PipelineStats {
     pub bursts_lost_from_ring: u64,
     pub demodulated: u64,
     pub decoded_frames: u64,
+    /// CPU time per stage (nanoseconds), for profiling.
+    pub ns_detect: u64,
+    pub ns_extract: u64,
+    pub ns_demod: u64,
+    pub ns_decode: u64,
 }
 
 /// Per-burst diagnostic record (collected only when tracing is on).
@@ -100,7 +105,9 @@ impl Pipeline {
         self.ring.push(block);
         self.next_index = self.next_index.offset(block.len() as i64);
         self.stats.samples += block.len() as u64;
+        let t = std::time::Instant::now();
         let bursts = self.detector.push(block);
+        self.stats.ns_detect += t.elapsed().as_nanos() as u64;
         let mut out = Vec::new();
         for b in bursts {
             self.stats.bursts += 1;
@@ -119,17 +126,28 @@ impl Pipeline {
     }
 
     fn handle_burst_inner(&mut self, b: &Burst, tr: &mut BurstTrace) -> Vec<ReceiverEvent> {
-        let Some(bb) = extract(&self.ring, b, self.rate, self.center, &self.cfg.extract) else {
+        let t = std::time::Instant::now();
+        let extracted = extract(&self.ring, b, self.rate, self.center, &self.cfg.extract);
+        self.stats.ns_extract += t.elapsed().as_nanos() as u64;
+        let Some(bb) = extracted else {
             self.stats.bursts_lost_from_ring += 1;
             return Vec::new();
         };
         tr.extracted = true;
-        // One demodulation pass per distinct symbol rate the decoders need.
+        // Tone pair once per burst, then one slicing pass per distinct symbol rate.
         let mut out = Vec::new();
         let mut any_demod = false;
-        for rate in symbol_rates(&self.decoders) {
+        let t = std::time::Instant::now();
+        let tones = find_tone_pair(&bb, &self.cfg.fsk);
+        self.stats.ns_demod += t.elapsed().as_nanos() as u64;
+        let Some(tones) = tones else { return out };
+        let relevant = decoders_for_center(&self.decoders, self.center);
+        for rate in symbol_rates(&relevant) {
             let params = FskParams { symbol_rate: rate, ..self.cfg.fsk };
-            let Some(sym) = demod_fsk(&bb, &params) else { continue };
+            let t = std::time::Instant::now();
+            let demod = demod_fsk_with_tones(&bb, &params, tones);
+            self.stats.ns_demod += t.elapsed().as_nanos() as u64;
+            let Some(sym) = demod else { continue };
             any_demod = true;
             if self.trace && tr.symbols.is_none() {
                 let inv = crate::bits::inverted(&sym.bits);
@@ -138,7 +156,9 @@ impl Pipeline {
             }
             let signal = Signal { center: bb.center, f_mark: sym.f_mark, f_space: sym.f_space, symbol_rate: sym.symbol_rate, rssi: sym.rssi, snr: sym.snr, noise: sym.noise };
             let time = self.time_of(sym.t0);
-            let decoded = decode_all(&decoders_for_rate(&self.decoders, rate), &sym.bits);
+            let t = std::time::Instant::now();
+            let decoded = decode_all(&decoders_for_rate(&relevant, rate), &sym.bits);
+            self.stats.ns_decode += t.elapsed().as_nanos() as u64;
             self.stats.decoded_frames += decoded.len() as u64;
             tr.frames += decoded.len();
             out.extend(decoded.into_iter().map(|d| ReceiverEvent { receiver: self.receiver.clone(), time, signal, sensor: d.payload, raw: d.raw }));

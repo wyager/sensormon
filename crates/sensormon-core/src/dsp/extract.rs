@@ -41,7 +41,7 @@ impl Default for ExtractConfig {
         // Wide by default: the FSK matched filters are only a symbol-rate wide, so
         // extra bandwidth here costs no SNR, while a burst whose detected center is
         // off by a tone spacing must still keep both tones inside the passband.
-        ExtractConfig { target_rate: SampleRate(250_000), pad_s: 0.002, cutoff_factor: 1.2, min_cutoff: Hertz::khz(110.0), taps: 95 }
+        ExtractConfig { target_rate: SampleRate(250_000), pad_s: 0.002, cutoff_factor: 1.2, min_cutoff: Hertz::khz(110.0), taps: 63 }
     }
 }
 
@@ -54,7 +54,9 @@ pub fn extract(ring: &SampleRing, burst: &Burst, source_rate: SampleRate, source
     // A region wide enough to hold two signals (a burst merged with a neighbour)
     // is kept whole at a higher baseband rate, so the tone search can still pick
     // the strongest pair anywhere inside it.
-    let wanted = cfg.target_rate.hz().max(burst.bandwidth().0 * cfg.cutoff_factor * 2.5);
+    // …but never more than half the source rate: a region wider than that is
+    // splatter or several signals, and the cost of filtering at full rate isn't worth it.
+    let wanted = cfg.target_rate.hz().max(burst.bandwidth().0 * cfg.cutoff_factor * 2.5).min(source_rate.hz() / 2.0);
     let decim = ((source_rate.hz() / wanted).floor() as usize).max(1);
     let out_rate = SampleRate((source_rate.hz() / decim as f64).round() as u32);
     let offset = burst.center() - source_center; // Hz relative to capture center

@@ -1,6 +1,6 @@
 //! Fineoffset WH51 soil moisture: 14 bytes after sync, family 0x51.
 
-use super::{fineoffset, Decoded, Decoder, FrameError, Modulation};
+use super::{fineoffset, Band, Decoded, Decoder, FrameError, Modulation, FINEOFFSET_BANDS};
 use crate::crc::{crc8_fineoffset, sum8};
 use crate::event::{Payload, Wh51};
 
@@ -42,6 +42,9 @@ impl Decoder for Wh51Decoder {
     }
     fn modulation(&self) -> Modulation {
         Modulation::Fsk { symbol_rate: fineoffset::SYMBOL_RATE }
+    }
+    fn bands(&self) -> &'static [Band] {
+        FINEOFFSET_BANDS
     }
     fn decode(&self, bits: &[bool]) -> Vec<Decoded> {
         fineoffset::frame_starts(bits)
