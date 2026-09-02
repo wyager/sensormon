@@ -97,7 +97,17 @@ pub struct BurstDetector {
     fft: Arc<dyn Fft<f32>>,
     window: Vec<f32>,
     scratch: Vec<Complex<f32>>,
-    floor_db: Vec<f32>,
+    /// Tracked noise floor per bin, linear power (arithmetic mean of non-burst hops).
+    floor: Vec<f32>,
+    /// Threshold ratios derived once from the dB config (see `ratios`).
+    r_hot: f32,
+    r_open: f32,
+    trim_ratio: f32,
+    rise_cap: f32,
+    /// Scratch buffers reused every hop.
+    p_lin: Vec<f32>,
+    s_lin: Vec<f32>,
+    hot: Vec<bool>,
     hot_streak: Vec<u32>,
     active: Vec<Region>,
     /// Samples not yet forming a whole hop.
@@ -115,6 +125,20 @@ pub struct BurstDetector {
 
 const INIT_HOPS: u32 = 16;
 
+/// Thresholds are configured in dB above the floor as it was originally
+/// tracked (an average of dB values, i.e. the geometric mean of the noise).
+/// The floor is now tracked in linear power (arithmetic mean). What gets
+/// thresholded is the 3-bin smoothed power, a Gamma(3) variable, whose
+/// geometric mean sits (10/ln 10)(ψ(3) − ln 3) ≈ 0.76 dB below its arithmetic
+/// mean, so the same operating point is `threshold − 0.76 dB` as a ratio.
+fn ratio(over_geometric_mean: Db) -> f32 {
+    10f32.powf((over_geometric_mean.0 - 0.76) / 10.0)
+}
+
+fn to_db(lin: f32) -> f32 {
+    10.0 * (lin + 1e-20).log10()
+}
+
 impl BurstDetector {
     pub fn new(cfg: BurstDetectorConfig, rate: SampleRate, center: Hertz, first_index: SampleIndex) -> Self {
         let n = cfg.fft_size;
@@ -127,6 +151,7 @@ impl BurstDetector {
                 0.35875 - 0.48829 * x.cos() + 0.14128 * (2.0 * x).cos() - 0.01168 * (3.0 * x).cos()
             })
             .collect();
+        let (r_hot, r_open, trim_ratio) = (ratio(cfg.threshold), ratio(cfg.open_threshold), 10f32.powf(cfg.dynamic_range.0 / 10.0));
         BurstDetector {
             cfg,
             rate,
@@ -134,7 +159,14 @@ impl BurstDetector {
             fft,
             window,
             scratch: vec![Complex::new(0.0, 0.0); n],
-            floor_db: vec![-100.0; n],
+            floor: vec![1e-10; n],
+            r_hot,
+            r_open,
+            trim_ratio,
+            rise_cap: 10f32.powf(0.002),
+            p_lin: vec![0.0; n],
+            s_lin: vec![0.0; n],
+            hot: vec![false; n],
             hot_streak: vec![0; n],
             active: Vec::new(),
             pending: Vec::with_capacity(n),
@@ -194,80 +226,82 @@ impl BurstDetector {
             self.scratch[i] = hop[i] * self.window[i];
         }
         self.fft.process(&mut self.scratch);
-        // power per bin, fft-shifted, dB
+        // power per bin, fft-shifted, linear
         let norm = 1.0 / (n as f32 * 0.2576); // window power normalisation (BH4: mean w^2 ≈ 0.2576)
-        let mut p_db = vec![0.0f32; n];
         for k in 0..n {
             let src = (k + n / 2) % n;
-            p_db[k] = 10.0 * (self.scratch[src].norm_sqr() * norm + 1e-20).log10();
+            self.p_lin[k] = self.scratch[src].norm_sqr() * norm;
         }
         let max_hops = self.hops(self.cfg.max_duration_s);
         let dc_lo = n / 2 - self.cfg.dc_guard_bins;
         let dc_hi = n / 2 + self.cfg.dc_guard_bins;
-        // 3-bin smoothing in the linear domain knocks single-bin noise spikes down
-        let p_lin: Vec<f32> = p_db.iter().map(|d| 10f32.powf(d / 10.0)).collect();
+        // 3-bin smoothing knocks single-bin noise spikes down
         for k in 0..n {
-            let l = if k == 0 { p_lin[k] } else { p_lin[k - 1] };
-            let r = if k + 1 == n { p_lin[k] } else { p_lin[k + 1] };
-            p_db[k] = 10.0 * ((l + p_lin[k] + r) / 3.0 + 1e-20).log10();
+            let l = self.p_lin[k.saturating_sub(1)];
+            let r = self.p_lin[(k + 1).min(n - 1)];
+            self.s_lin[k] = (l + self.p_lin[k] + r) * (1.0 / 3.0);
         }
-        // Startup: average the first hops (linear) before detecting anything.
+        // Startup: average the first hops before detecting anything.
         if self.init_hops < INIT_HOPS {
             for k in 0..n {
-                self.init_acc[k] += 10f32.powf(p_db[k] / 10.0);
+                self.init_acc[k] += self.s_lin[k];
             }
             self.init_hops += 1;
             if self.init_hops == INIT_HOPS {
                 for k in 0..n {
-                    self.floor_db[k] = 10.0 * (self.init_acc[k] / INIT_HOPS as f32 + 1e-20).log10();
+                    self.floor[k] = self.init_acc[k] / INIT_HOPS as f32;
                 }
             }
             return;
         }
         let trace_bin = self.trace_bin;
-        let mut hot = vec![false; n];
+        let (r_hot, rise_cap) = (self.r_hot, self.rise_cap);
         for k in 0..n {
-            let f = self.floor_db[k];
-            let p = p_db[k];
-            let is_hot = p > f + self.cfg.threshold.0;
+            let f = self.floor[k];
+            let p = self.s_lin[k];
+            let is_hot = p > f * r_hot;
             self.hot_streak[k] = if is_hot { self.hot_streak[k] + 1 } else { 0 };
             let carrier = self.hot_streak[k] as u64 > max_hops;
             // Floor tracker: exponential average toward the current level, with the
-            // upward step rate-limited so a burst lifts it by at most a few dB while a
-            // permanent carrier is absorbed into the floor within ~0.1 s.
-            let delta = (p - f) * 0.02;
-            self.floor_db[k] = f + if is_hot { delta.min(0.02) } else { delta };
+            // upward step rate-limited (0.02 dB/hop) while hot so a burst lifts it by
+            // at most a few dB while a permanent carrier is absorbed within ~0.1 s.
+            let next = f + (p - f) * 0.02;
+            self.floor[k] = if is_hot { next.min(f * rise_cap) } else { next };
             let in_dc = self.cfg.dc_guard_bins > 0 && (dc_lo..=dc_hi).contains(&k);
-            hot[k] = is_hot && !carrier && !in_dc;
+            self.hot[k] = is_hot && !carrier && !in_dc;
             if trace_bin == Some(k) && hop_idx.is_multiple_of(20) {
-                eprintln!("hop {hop_idx} bin {k}: p={p:.1} floor={f:.1} hot={is_hot} streak={}", self.hot_streak[k]);
+                eprintln!("hop {hop_idx} bin {k}: p={:.1} floor={:.1} hot={is_hot} streak={}", to_db(p), to_db(f), self.hot_streak[k]);
             }
         }
         // group hot bins into regions, bridging gaps up to merge_gap
         let gap_bins = (self.cfg.merge_gap.0 / self.bin_hz()).round() as usize;
         let mut regions: Vec<(usize, usize, f32, f32)> = Vec::new(); // lo, hi, peak_db, noise_db
+        let (hot, s_lin, floor) = (&self.hot, &self.s_lin, &self.floor);
         let mut k = 0;
         while k < n {
             if hot[k] {
                 let lo = k;
                 let mut hi = k;
-                let mut peak = p_db[k];
+                let mut peak = s_lin[k];
                 let mut j = k + 1;
                 let mut last_hot = k;
                 while j < n && j - last_hot <= gap_bins {
                     if hot[j] {
                         last_hot = j;
                         hi = j;
-                        peak = peak.max(p_db[j]);
+                        peak = peak.max(s_lin[j]);
                     }
                     j += 1;
                 }
                 // trim to the bins within `dynamic_range` of the peak
-                let cut = peak - self.cfg.dynamic_range.0;
-                let lo_t = (lo..=hi).find(|&b| hot[b] && p_db[b] >= cut).unwrap_or(lo);
-                let hi_t = (lo..=hi).rev().find(|&b| hot[b] && p_db[b] >= cut).unwrap_or(hi);
-                let noise = self.floor_db[lo_t..=hi_t].iter().cloned().fold(f32::INFINITY, f32::min);
-                regions.push((lo_t, hi_t, peak, noise));
+                let cut = peak / self.trim_ratio;
+                let lo_t = (lo..=hi).find(|&b| hot[b] && s_lin[b] >= cut).unwrap_or(lo);
+                let hi_t = (lo..=hi).rev().find(|&b| hot[b] && s_lin[b] >= cut).unwrap_or(hi);
+                let noise = floor[lo_t..=hi_t].iter().cloned().fold(f32::INFINITY, f32::min);
+                if peak > noise * self.r_open || self.active.iter().any(|a| lo_t <= a.hi_bin && a.lo_bin <= hi_t) {
+                    // dB only per region (a handful per hop), never per bin
+                    regions.push((lo_t, hi_t, to_db(peak), to_db(noise)));
+                }
                 k = hi + 1;
             } else {
                 k += 1;
@@ -295,11 +329,8 @@ impl BurstDetector {
                     }
                 }
                 None => {
-                    if peak < noise + self.cfg.open_threshold.0 {
-                        continue;
-                    }
                     if trace_bin.is_some() {
-                        eprintln!("open region bins {lo}..{hi} at hop {hop_idx} peak {peak:.1} floor-there {:.1}", self.floor_db[lo]);
+                        eprintln!("open region bins {lo}..{hi} at hop {hop_idx} peak {peak:.1} floor-there {:.1}", to_db(self.floor[lo]));
                     }
                     self.active.push(Region { lo_bin: lo, hi_bin: hi, start_hop: hop_idx, last_hop: hop_idx, peak: Db(peak), noise: Db(noise) });
                 }
