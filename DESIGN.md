@@ -1,5 +1,10 @@
 # sensormon — design
 
+> Original design sketch (pre-implementation). README.md describes what was
+> actually built; where they differ (subprocess adapters → dlopen'ed drivers,
+> rtl_433 JSON → own typed events, `sensormon-tools` folded into the binary),
+> the code and the Decisions section at the bottom win.
+
 Wideband multi-signal receiver for 915 MHz Fineoffset/Ecowitt sensors (and later
 anything else FSK/OOK we care about). Replaces rtl_433 in the home2 pipeline.
 
