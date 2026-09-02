@@ -181,6 +181,13 @@ compared for a while before switching `--rtl433-address`.
   (fixture jsonl), and additionally decode the bursts rtl_433 misses; regression on every change.
 - Bench: throughput on 2.5 MS/s must fit in < 1 vCPU on radio (N150-class).
 
-## Open questions (answer before code)
+## Decisions (2026-09-02)
 
-See conversation.
+1. Own typed event format (`Event { reception, sensor, raw }`), exported from
+   `sensormon-core` for home automation code to import. No rtl_433 JSON compatibility.
+2. In-process SDR library bindings from day one (dlopen'ed, hand-written FFI).
+3. Standalone Cargo workspace, git tracked.
+4. Cross-compiled glibc binary (`cargo zigbuild`) deployed to `radio`, run beside rtl_433.
+5. Decoders v1: WS90, WH51, WH55, WH57(WH31L), WH25/WH32.
+6. Merged events carry a map `receiver → Signal`.
+7. IQ corpus lives in `samples/` (gitignored).

@@ -23,7 +23,7 @@ pub fn decode_frame(b: &[u8], burst_bits: usize) -> Result<Wh25, FrameError> {
         return Err(FrameError::Integrity);
     }
     let x = xor8(&b[..6]);
-    let x = (x << 4) | (x >> 4);
+    let x = x.rotate_right(4);
     if variant == Wh25Variant::Wh25 && x != b[7] {
         return Err(FrameError::Integrity);
     }
@@ -33,9 +33,9 @@ pub fn decode_frame(b: &[u8], burst_bits: usize) -> Result<Wh25, FrameError> {
         id: ((b[0] & 0x0f) << 4) | (b[1] >> 4),
         variant,
         battery_ok: b[1] & 0x08 == 0,
-        temperature_c: (temp_raw != 0x7ff).then(|| (temp_raw as f32 - 400.0) * 0.1),
+        temperature_c: (temp_raw != 0x7ff).then_some((temp_raw as f32 - 400.0) * 0.1),
         humidity_pct: b[3],
-        pressure_hpa: (pressure_raw != 0xffff).then(|| pressure_raw as f32 * 0.1),
+        pressure_hpa: (pressure_raw != 0xffff).then_some(pressure_raw as f32 * 0.1),
     })
 }
 
@@ -70,7 +70,7 @@ mod tests {
         let mut b = vec![0xe5, 0xa1, 0xf4, 55, 0x27, 0x94];
         b.push(sum8(&b));
         let x = xor8(&b[..6]);
-        b.push((x << 4) | (x >> 4));
+        b.push(x.rotate_right(4));
         let p = decode_frame(&b, 480).unwrap();
         assert_eq!(p.id, 0x5a);
         assert!((p.temperature_c.unwrap() - 10.0).abs() < 1e-4);

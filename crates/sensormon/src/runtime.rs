@@ -110,7 +110,7 @@ impl Runtime {
                         index = index.offset(block.dropped_before as i64);
                         pipeline.anchor(index, Utc::now());
                     }
-                    if blocks % 64 == 0 {
+                    if blocks.is_multiple_of(64) {
                         pipeline.anchor(index, Utc::now() - chrono::Duration::milliseconds((block.samples.len() as f64 / rate.hz() * 1e3) as i64));
                     }
                     for ev in pipeline.push(&block.samples) {

@@ -239,7 +239,7 @@ impl BurstDetector {
             self.floor_db[k] = f + if is_hot { delta.min(0.02) } else { delta };
             let in_dc = self.cfg.dc_guard_bins > 0 && (dc_lo..=dc_hi).contains(&k);
             hot[k] = is_hot && !carrier && !in_dc;
-            if trace_bin == Some(k) && hop_idx % 20 == 0 {
+            if trace_bin == Some(k) && hop_idx.is_multiple_of(20) {
                 eprintln!("hop {hop_idx} bin {k}: p={p:.1} floor={f:.1} hot={is_hot} streak={}", self.hot_streak[k]);
             }
         }
