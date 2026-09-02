@@ -1,0 +1,11 @@
+[Unit]
+Description=sensormon wideband ISM sensor receiver
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/sensormon run --config /etc/sensormon.toml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

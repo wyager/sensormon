@@ -1,0 +1,13 @@
+[[receiver]]
+name = "garage-nesdr"
+kind = "rtlsdr"
+index = 0
+center_hz = 915_000_000
+sample_rate = 2_400_000
+gain = 40.2
+
+[merge]
+window_ms = 2000
+
+[http]
+bind = "0.0.0.0:8433"

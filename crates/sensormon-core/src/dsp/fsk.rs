@@ -90,8 +90,14 @@ fn find_tones(bb: &Baseband, p: &FskParams) -> Option<(f64, f64, Db, Db)> {
     if sep < p.min_separation.0 || sep > p.max_separation.0 {
         return None;
     }
-    let peak = Db(pw[k1].max(pw[k2]) - 10.0 * (m as f32).log10()); // per-sample-ish dBFS
-    let noise = Db(median - 10.0 * (m as f32).log10());
+    // Tone power (dBFS) from this spectrum; noise from the detector's tracked
+    // floor (robust, excludes bursts), scaled to one symbol-rate bandwidth —
+    // what a matched-filter detector sees — so SNR is comparable across sample
+    // rates and with rtl_433's figures rather than inflated by FFT gain.
+    let scale = 10.0 * (m as f32).log10();
+    let peak = Db(pw[k1].max(pw[k2]) - scale);
+    let bins_per_symbol_bw = (p.symbol_rate.0 / bb.burst.noise_bin_hz.0).max(1.0) as f32;
+    let noise = Db(bb.burst.noise.0 + 10.0 * bins_per_symbol_bw.log10());
     Some((f1.min(f2), f1.max(f2), peak, noise))
 }
 
@@ -275,7 +281,7 @@ mod tests {
             }
             iq.push(s);
         }
-        let burst = Burst { start: SampleIndex(0), end: SampleIndex(total as u64), f_lo: Hertz(915e6 - dev), f_hi: Hertz(915e6 + dev), peak: Db(-10.0), noise: Db(-50.0) };
+        let burst = Burst { start: SampleIndex(0), end: SampleIndex(total as u64), f_lo: Hertz(915e6 - dev), f_hi: Hertz(915e6 + dev), peak: Db(-10.0), noise: Db(-50.0), noise_bin_hz: Hertz(4882.8) };
         Baseband { iq, sample_rate: SampleRate(fs as u32), center: Hertz(915e6), start: SampleIndex(0), decim: 1, source_dc_offset: Hertz(-100e3), burst }
     }
 

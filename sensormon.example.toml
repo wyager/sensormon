@@ -1,0 +1,26 @@
+# sensormon configuration. One [[receiver]] per SDR; events from all of them
+# are merged (same transmission heard by several receivers = one event).
+
+[[receiver]]
+name = "tower-airspy"
+kind = "airspy"
+# serial = "637862dc2e2d1bd7"     # optional; first device if omitted
+center_hz = 915_000_000
+sample_rate = 2_500_000
+gain = { lna = 12, mix = 12, vga = 12 }   # each 0..15; or gain = { linearity = 14 } / { sensitivity = 14 }
+bias_tee = false
+
+[[receiver]]
+name = "garage-nesdr"
+kind = "rtlsdr"
+index = 0
+center_hz = 915_000_000
+sample_rate = 2_400_000
+gain = 40.2                # dB, or "auto"
+bias_tee = false
+
+[merge]
+window_ms = 2000           # copies of one transmission arriving within this are merged
+
+[http]
+bind = "0.0.0.0:8433"      # GET /events (JSON lines), /stats, /health

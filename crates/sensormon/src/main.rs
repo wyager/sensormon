@@ -1,6 +1,12 @@
 //! sensormon binary: runtime around `sensormon-core`.
 
+mod config;
+mod filesource;
+mod http;
 mod iqfile;
+mod runtime;
+mod sdr;
+mod source;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -27,6 +33,11 @@ enum Format {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Run receivers from a config file and serve events over HTTP.
+    Run {
+        #[arg(long, default_value = "sensormon.toml")]
+        config: PathBuf,
+    },
     /// Run the full pipeline over a recorded IQ file and print decoded events as JSON lines.
     DecodeFile {
         file: PathBuf,
@@ -57,6 +68,7 @@ enum Cmd {
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
+        Cmd::Run { config } => run(&config),
         Cmd::DecodeFile { file, rate, center, format, receiver, summary, block, trace, from, to } => {
             let rate = SampleRate(rate);
             // file mode: event time = offset into the file, from the Unix epoch
@@ -100,4 +112,32 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn run(config_path: &std::path::Path) -> Result<()> {
+    let cfg = config::load(config_path)?;
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    rt.block_on(async {
+        let runtime = runtime::Runtime::start(&cfg)?;
+        let events = runtime.events.clone();
+        let runtime = std::sync::Arc::new(std::sync::Mutex::new(runtime));
+        let app = http::router(http::AppState { runtime: runtime.clone(), events: events.clone() });
+        let listener = tokio::net::TcpListener::bind(&cfg.http.bind).await.with_context(|| format!("bind {}", cfg.http.bind))?;
+        eprintln!("http: listening on {}", cfg.http.bind);
+        // log events to stderr as well, so `journalctl` shows decodes
+        let mut log_rx = events.subscribe();
+        tokio::spawn(async move {
+            while let Ok(ev) = log_rx.recv().await {
+                let rx: Vec<String> = ev.reception.heard_by.iter().map(|(r, s)| format!("{r}:snr{:.0}", s.snr.0)).collect();
+                eprintln!("{} {} {:06x} [{}]", ev.reception.time.format("%H:%M:%S%.3f"), ev.sensor.model(), ev.sensor.sensor_id(), rx.join(","));
+            }
+        });
+        let serve = axum::serve(listener, app);
+        tokio::select! {
+            r = serve => { r?; }
+            _ = tokio::signal::ctrl_c() => { eprintln!("stopping"); }
+        }
+        runtime.lock().unwrap().stop();
+        Ok::<(), anyhow::Error>(())
+    })
 }

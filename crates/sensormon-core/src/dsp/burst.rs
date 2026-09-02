@@ -65,8 +65,10 @@ pub struct Burst {
     pub f_lo: Hertz,
     pub f_hi: Hertz,
     pub peak: Db,
-    /// Noise floor (dBFS per bin) under the burst when it started.
+    /// Noise floor (dBFS per detector bin) under the burst when it started.
     pub noise: Db,
+    /// Width of the bins `noise` refers to.
+    pub noise_bin_hz: Hertz,
 }
 
 impl Burst {
@@ -325,6 +327,7 @@ impl BurstDetector {
                         f_hi: self.bin_freq(a.hi_bin + 1),
                         peak: a.peak,
                         noise: a.noise,
+                        noise_bin_hz: Hertz(self.bin_hz()),
                     });
                 }
             } else {
