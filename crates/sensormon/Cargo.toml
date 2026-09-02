@@ -1,0 +1,15 @@
+[package]
+name = "sensormon"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Wideband multi-signal ISM sensor receiver: SDRs in, decoded sensor events out."
+
+[dependencies]
+sensormon-core = { path = "../sensormon-core" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = "0.4"
+num-complex = "0.4"
