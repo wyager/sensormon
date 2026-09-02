@@ -1,5 +1,9 @@
 # sensormon
 
+Note from Will: I had Claude create this because `rtl_433` wasn't quite working for me. I switched to an Airspy SDR, which does minimum 2.5MSps, and this resulted in it picking up some ambient SMPS noise that caused `rtl_433` to ignore the actual signals I care about. `sensormon` has a channelization mechanism that works better with wideband receivers and also seems to provide better sensitivity on high-dynamic-range receivers. 
+
+Remainder is Claude-written.
+
 Wideband, multi-signal receiver for 915 MHz Fineoffset/Ecowitt sensors. SDRs in
 (Airspy, RTL-SDR, or recorded IQ files), decoded sensor events out (HTTP JSON
 lines, and typed Rust structs you can import).
