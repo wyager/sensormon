@@ -20,3 +20,11 @@ window_ms = 2000
 
 [http]
 bind = "0.0.0.0:8433"
+
+[chirps]
+# Rolling backlog of every burst that didn't decode (see README "Chirps"). The tower's 915 MHz
+# AMI meter hopper alone produces ~20 bursts/s, so this is a ~20 minute window at 500 MB;
+# `receivers = ["garage-nesdr"]` would make it a days-long backlog of the quiet bands instead.
+path = "/var/lib/sensormon/chirps.db"
+max_bytes = 500_000_000
+max_examples_per_group = 3

@@ -2,3 +2,5 @@ target/
 samples/*.cs16
 samples/*.cu8
 samples/*.cf32
+survey-*/groups_final.json
+survey-*/*.err
