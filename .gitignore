@@ -4,3 +4,5 @@ samples/*.cu8
 samples/*.cf32
 survey-*/groups_final.json
 survey-*/*.err
+__pycache__/
+samples/
