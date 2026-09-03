@@ -3,14 +3,14 @@
 
 use crate::dsp::burst::{Burst, BurstDetector, BurstDetectorConfig};
 use crate::dsp::extract::{extract, ExtractConfig};
-use crate::dsp::fsk::{demod_fsk_with_tones, find_tone_pair, FskParams};
+use crate::dsp::extract::Baseband;
+use crate::dsp::fsk::{demod_fsk_with_tones, find_tone_pair, FskParams, Symbols, Tones};
 use crate::dsp::ring::SampleRing;
 use crate::dsp::Iq;
 use crate::event::{ReceiverEvent, ReceiverId, Signal};
 use crate::protocol::{decode_all, decoders_for_center, decoders_for_rate, symbol_rates, Decoder};
 use crate::units::{Hertz, SampleIndex, SampleRate};
 use chrono::{DateTime, Duration, Utc};
-use crate::dsp::fsk::Symbols;
 
 #[derive(Clone, Debug)]
 pub struct PipelineConfig {
@@ -53,6 +53,20 @@ pub struct BurstTrace {
     pub frames: usize,
 }
 
+/// A burst that produced no decoded frame, with everything needed to look at
+/// it later: the isolated baseband IQ and whatever the demodulator found.
+#[derive(Clone, Debug)]
+pub struct Chirp {
+    pub receiver: ReceiverId,
+    pub time: DateTime<Utc>,
+    pub burst: Burst,
+    pub baseband: Baseband,
+    /// Tone pair if one was found (FSK-like).
+    pub tones: Option<Tones>,
+    /// Best demodulation attempt (first symbol rate that yielded bits), if any.
+    pub symbols: Option<Symbols>,
+}
+
 pub struct Pipeline {
     receiver: ReceiverId,
     rate: SampleRate,
@@ -68,13 +82,15 @@ pub struct Pipeline {
     stats: PipelineStats,
     trace: bool,
     traces: Vec<BurstTrace>,
+    keep_undecoded: bool,
+    chirps: Vec<Chirp>,
 }
 
 impl Pipeline {
     pub fn new(receiver: ReceiverId, rate: SampleRate, center: Hertz, cfg: PipelineConfig, start_time: DateTime<Utc>) -> Self {
         let ring = SampleRing::new(rate.samples_in(cfg.ring_seconds as f64), SampleIndex(0));
         let detector = BurstDetector::new(cfg.detector.clone(), rate, center, SampleIndex(0));
-        Pipeline { receiver, rate, center, cfg, ring, detector, decoders: crate::protocol::decoders(), next_index: SampleIndex(0), anchor_time: start_time, anchor_index: SampleIndex(0), stats: PipelineStats::default(), trace: false, traces: Vec::new() }
+        Pipeline { receiver, rate, center, cfg, ring, detector, decoders: crate::protocol::decoders(), next_index: SampleIndex(0), anchor_time: start_time, anchor_index: SampleIndex(0), stats: PipelineStats::default(), trace: false, traces: Vec::new(), keep_undecoded: false, chirps: Vec::new() }
     }
 
     /// Re-anchor stream time to wall clock (call occasionally from the runtime).
@@ -93,6 +109,15 @@ impl Pipeline {
 
     pub fn take_traces(&mut self) -> Vec<BurstTrace> {
         std::mem::take(&mut self.traces)
+    }
+
+    /// Keep bursts that decode to nothing (see `Chirp`); drain with `take_chirps`.
+    pub fn set_keep_undecoded(&mut self, on: bool) {
+        self.keep_undecoded = on;
+    }
+
+    pub fn take_chirps(&mut self) -> Vec<Chirp> {
+        std::mem::take(&mut self.chirps)
     }
 
     pub fn time_of(&self, index: SampleIndex) -> DateTime<Utc> {
@@ -140,8 +165,14 @@ impl Pipeline {
         let t = std::time::Instant::now();
         let tones = find_tone_pair(&bb, &self.cfg.fsk);
         self.stats.ns_demod += t.elapsed().as_nanos() as u64;
-        let Some(tones) = tones else { return out };
+        let Some(tones) = tones else {
+            if self.keep_undecoded {
+                self.chirps.push(Chirp { receiver: self.receiver.clone(), time: self.time_of(b.start), burst: *b, baseband: bb, tones: None, symbols: None });
+            }
+            return out;
+        };
         let relevant = decoders_for_center(&self.decoders, self.center);
+        let mut first_symbols: Option<Symbols> = None;
         for rate in symbol_rates(&relevant) {
             let params = FskParams { symbol_rate: rate, ..self.cfg.fsk };
             let t = std::time::Instant::now();
@@ -149,6 +180,9 @@ impl Pipeline {
             self.stats.ns_demod += t.elapsed().as_nanos() as u64;
             let Some(sym) = demod else { continue };
             any_demod = true;
+            if first_symbols.is_none() {
+                first_symbols = Some(sym.clone());
+            }
             if self.trace && tr.symbols.is_none() {
                 let inv = crate::bits::inverted(&sym.bits);
                 tr.syncs = crate::protocol::fineoffset::frame_starts(&sym.bits).len() + crate::protocol::fineoffset::frame_starts(&inv).len();
@@ -165,6 +199,9 @@ impl Pipeline {
         }
         if any_demod {
             self.stats.demodulated += 1;
+        }
+        if self.keep_undecoded && out.is_empty() {
+            self.chirps.push(Chirp { receiver: self.receiver.clone(), time: self.time_of(b.start), burst: *b, baseband: bb, tones: Some(tones), symbols: first_symbols });
         }
         out
     }

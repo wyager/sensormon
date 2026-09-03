@@ -61,6 +61,7 @@ struct ReceiverHandle {
 pub struct Runtime {
     receivers: Vec<ReceiverHandle>,
     pub events: broadcast::Sender<Arc<Event>>,
+    pub chirps: Option<Arc<Mutex<crate::chirps::ChirpStore>>>,
 }
 
 fn make_source(rc: &ReceiverConfig) -> Result<Box<dyn IqSource>> {
@@ -92,6 +93,25 @@ impl Runtime {
     pub fn start(cfg: &Config) -> Result<Runtime> {
         let (events_tx, _) = broadcast::channel::<Arc<Event>>(256);
         let (rx_events_tx, rx_events_rx) = mpsc::channel::<ReceiverEvent>();
+        // Undecoded bursts go to one writer thread so the receiver threads never touch SQLite.
+        let (chirp_tx, chirp_rx) = mpsc::sync_channel::<sensormon_core::pipeline::Chirp>(256);
+        let chirps = match &cfg.chirps {
+            Some(cc) => {
+                let store = Arc::new(Mutex::new(crate::chirps::ChirpStore::open(cc.clone()).context("open chirp store")?));
+                let store2 = store.clone();
+                std::thread::Builder::new().name("chirp-store".into()).spawn(move || {
+                    while let Ok(c) = chirp_rx.recv() {
+                        if let Err(e) = store2.lock().unwrap().insert(&c) {
+                            eprintln!("chirp store: {e:#}");
+                        }
+                    }
+                })?;
+                eprintln!("chirps: recording undecoded bursts to {} (cap {:.0} MB)", cc.path, cc.max_bytes as f64 / 1e6);
+                Some(store)
+            }
+            None => None,
+        };
+        let keep_chirps = chirps.is_some();
         let mut receivers = Vec::new();
         for rc in &cfg.receivers {
             let source = make_source(rc)?;
@@ -104,6 +124,7 @@ impl Runtime {
             let stats2 = stats.clone();
             let ev_tx = rx_events_tx.clone();
             let name = rc.name.clone();
+            let chirp_tx = chirp_tx.clone();
             // Samples to discard after a retune while the PLL settles and the old band's tail flushes.
             let settle = rate.samples_in(0.06) as u64;
             std::thread::Builder::new().name(format!("rx-{name}")).spawn(move || {
@@ -129,7 +150,11 @@ impl Runtime {
                         global = global.offset(n as i64);
                         continue;
                     }
-                    let (pipeline, seen_upto) = pipelines.entry(key).or_insert_with(|| (Pipeline::new(receiver_id.clone(), rate, Hertz(block.center_hz), PipelineConfig::default(), Utc::now()), global));
+                    let (pipeline, seen_upto) = pipelines.entry(key).or_insert_with(|| {
+                        let mut p = Pipeline::new(receiver_id.clone(), rate, Hertz(block.center_hz), PipelineConfig::default(), Utc::now());
+                        p.set_keep_undecoded(keep_chirps);
+                        (p, global)
+                    });
                     let gap = seen_upto.distance_to(global);
                     if gap > 0 {
                         pipeline.skip_samples(gap, Utc::now());
@@ -139,6 +164,9 @@ impl Runtime {
                     }
                     for ev in pipeline.push(&block.samples) {
                         let _ = ev_tx.send(ev);
+                    }
+                    for c in pipeline.take_chirps() {
+                        let _ = chirp_tx.try_send(c); // full queue: drop rather than stall the receiver
                     }
                     global = global.offset(n as i64);
                     *seen_upto = global;
@@ -177,7 +205,8 @@ impl Runtime {
                 }
             }
         })?;
-        Ok(Runtime { receivers, events: events_tx })
+        drop(chirp_tx);
+        Ok(Runtime { receivers, events: events_tx, chirps })
     }
 
     pub fn status(&self) -> Vec<ReceiverStatus> {

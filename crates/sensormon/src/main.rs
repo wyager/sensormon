@@ -1,5 +1,6 @@
 //! sensormon binary: runtime around `sensormon-core`.
 
+mod chirps;
 mod config;
 mod filesource;
 mod http;
@@ -63,24 +64,39 @@ enum Cmd {
         from: f64,
         #[arg(long, default_value_t = f64::MAX)]
         to: f64,
+        /// Also record every undecoded burst into this chirp database (see /chirps).
+        #[arg(long)]
+        chirps_db: Option<PathBuf>,
     },
 }
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Run { config } => run(&config),
-        Cmd::DecodeFile { file, rate, center, format, receiver, summary, block, trace, from, to } => {
+        Cmd::DecodeFile { file, rate, center, format, receiver, summary, block, trace, from, to, chirps_db } => {
             let rate = SampleRate(rate);
             // file mode: event time = offset into the file, from the Unix epoch
             let epoch = chrono::DateTime::<Utc>::from_timestamp(0, 0).unwrap();
             let mut pipeline = Pipeline::new(ReceiverId(receiver), rate, Hertz(center), PipelineConfig::default(), epoch);
             pipeline.set_trace(trace);
+            let mut store = match &chirps_db {
+                Some(path) => {
+                    pipeline.set_keep_undecoded(true);
+                    Some(chirps::ChirpStore::open(chirps::ChirpStoreConfig { path: path.display().to_string(), max_bytes: 50_000_000, max_examples_per_group: 6 })?)
+                }
+                None => None,
+            };
             let mut reader = iqfile::Reader::open(&file, match format { Format::Cu8 => iqfile::Format::Cu8, Format::Cs16 => iqfile::Format::Cs16 }).with_context(|| format!("open {}", file.display()))?;
             let mut buf = Vec::with_capacity(block);
             let mut counts: BTreeMap<String, usize> = BTreeMap::new();
             let t_start = std::time::Instant::now();
             while reader.read_block(&mut buf, block)? > 0 {
                 let events = pipeline.push(&buf);
+                if let Some(st) = store.as_mut() {
+                    for c in pipeline.take_chirps() {
+                        st.insert(&c)?;
+                    }
+                }
                 for t in pipeline.take_traces() {
                     let t0 = rate.seconds_of(t.burst.start.0);
                     if t0 < from || t0 > to {
@@ -110,6 +126,10 @@ fn main() -> Result<()> {
             for (k, v) in counts {
                 println!("{v:4}  {k}");
             }
+            if let Some(st) = &store {
+                let cs = st.stats()?;
+                eprintln!("chirps: {} stored in {} groups, {:.1} MB", cs.chirps, cs.groups, cs.bytes as f64 / 1e6);
+            }
             Ok(())
         }
     }
@@ -121,8 +141,9 @@ fn run(config_path: &std::path::Path) -> Result<()> {
     rt.block_on(async {
         let runtime = runtime::Runtime::start(&cfg)?;
         let events = runtime.events.clone();
+        let chirps = runtime.chirps.clone();
         let runtime = std::sync::Arc::new(std::sync::Mutex::new(runtime));
-        let app = http::router(http::AppState { runtime: runtime.clone(), events: events.clone() });
+        let app = http::router(http::AppState { runtime: runtime.clone(), events: events.clone(), chirps });
         let listener = tokio::net::TcpListener::bind(&cfg.http.bind).await.with_context(|| format!("bind {}", cfg.http.bind))?;
         eprintln!("http: listening on {}", cfg.http.bind);
         // log events to stderr as well, so `journalctl` shows decodes

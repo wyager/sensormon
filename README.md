@@ -72,6 +72,29 @@ Event shape (control plane and data plane kept apart):
  "raw":[144,1,11,155,...]}
 ```
 
+### Chirps: everything that *didn't* decode
+
+With a `[chirps]` section in the config, every burst that yields no frame is
+kept: `groups` aggregates recurring emitters (receiver, center to 10 kHz,
+bandwidth class, duration class → count, first/last seen, mean SNR, FSK tone
+spacing, symbol rate, last bits, typical period), and a few example IQ
+captures per group are stored as peak-normalised int8 I/Q (`.cs8`, already
+mixed to the burst's center) under a global cap (default 50 MB, oldest
+evicted; group statistics survive eviction).
+
+```
+GET /chirps/stats                 counts, bytes, time span
+GET /chirps/groups?receiver=&min_count=   recurring emitters, most frequent first
+GET /chirps?group=N&limit=        example metadata for a group
+GET /chirps/<id>                  one chirp's metadata
+GET /chirps/<id>/iq               raw cs8; X-Sample-Rate / X-Center-Hz headers
+```
+
+An example can be fed straight to rtl_433 to try its ~250 decoders:
+`rtl_433 -r chirp.cs8 -s <sample_rate> -f <center>` (also `-A` to analyse).
+`decode-file --chirps-db path` does the same offline. `tools/rf-survey/`
+turns the store (and rtl_power sweeps) into a survey report.
+
 `sensormon_core::{Event, Reception, Signal, Payload, ...}` are the types to
 import from home automation code (`Payload` is an enum: `Ws90`, `Wh51`,
 `Wh55`, `Wh31l`, `Wh25`, `ToyotaTpms`; fields the sensor can flag as

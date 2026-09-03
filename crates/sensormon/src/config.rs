@@ -13,6 +13,8 @@ pub struct Config {
     pub merge: MergeConfig,
     #[serde(default)]
     pub http: HttpConfig,
+    /// Rolling store of undecoded bursts (see chirps.rs); absent = off.
+    pub chirps: Option<crate::chirps::ChirpStoreConfig>,
 }
 
 #[derive(Debug, Deserialize)]

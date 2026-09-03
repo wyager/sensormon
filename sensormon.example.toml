@@ -26,3 +26,12 @@ window_ms = 2000           # copies of one transmission arriving within this are
 
 [http]
 bind = "0.0.0.0:8433"      # GET /events (JSON lines), /stats, /health
+
+# Rolling store of bursts that decoded to nothing ("chirps"): grouped by
+# receiver/frequency/bandwidth/duration with counts, plus a few example IQ
+# captures per group (peak-normalised cs8) under a global byte cap. Served at
+# /chirps/stats, /chirps/groups, /chirps?group=N, /chirps/<id>, /chirps/<id>/iq.
+[chirps]
+path = "/var/lib/sensormon/chirps.db"
+max_bytes = 50_000_000
+max_examples_per_group = 6

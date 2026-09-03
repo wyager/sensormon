@@ -1,0 +1,18 @@
+# Overnight 2026-09-03: Airspy only (NESDR is running rtl_power sweeps); chirp store on.
+[[receiver]]
+name = "tower-airspy"
+kind = "airspy"
+center_hz = 915_000_000
+sample_rate = 2_500_000
+gain = { lna = 12, mix = 12, vga = 12 }
+
+[merge]
+window_ms = 2000
+
+[http]
+bind = "0.0.0.0:8433"
+
+[chirps]
+path = "/var/lib/sensormon/chirps.db"
+max_bytes = 50_000_000
+max_examples_per_group = 6
