@@ -25,6 +25,6 @@ bind = "0.0.0.0:8433"
 
 [chirps]
 path = "/var/lib/sensormon/chirps-survey.db"
-max_bytes = 200_000_000
-max_examples_per_group = 4
+max_bytes = 2_000_000_000
+max_examples_per_group = 3
 receivers = ["survey-nesdr"]

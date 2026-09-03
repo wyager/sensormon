@@ -92,8 +92,32 @@ GET /chirps/<id>/iq               raw cs8; X-Sample-Rate / X-Center-Hz headers
 
 An example can be fed straight to rtl_433 to try its ~250 decoders:
 `rtl_433 -r chirp.cs8 -s <sample_rate> -f <center>` (also `-A` to analyse).
-`decode-file --chirps-db path` does the same offline. `tools/rf-survey/`
-turns the store (and rtl_power sweeps) into a survey report.
+`decode-file --chirps-db path` does the same offline. `[chirps] receivers =
+["name", ...]` restricts recording to some receivers (a busy 915 MHz meter
+mesh at the tower churns a 50 MB store in under two minutes).
+
+### RF survey mode
+
+A hopping receiver with a long dwell turns sensormon into a burst-emitter
+survey instrument: `deploy/radio-survey-hop-*.toml` hops the NESDR over
+24–1700 MHz in 2.4 MHz steps with a 5 s dwell (`hop_hz`, `dwell_s`;
+`max_band_pipelines` caps the per-band pipelines kept resident, LRU — an
+evicted band re-learns its noise floor in a few ms when revisited). Pair it
+with a few `rtl_power` sweeps for the continuous carriers, then:
+
+```
+tools/rf-survey/sweep_report.py  sweep_*.csv           # rtl_power: carriers, ATSC pilots, occupancy per band, harmonic combs
+tools/rf-survey/hop_survey_report.py --host radio:8433 --sweep sweep_*mean*.csv --hide-continuous
+                                                       # chirp store: burst emitters per band; flags flicker of continuous
+                                                       # signals (FM modulation, spread-spectrum SMPS dither) and clock combs
+tools/rf-survey/chirps_report.py --host radio:8433 --coarse   # merge hoppers, run rtl_433 over examples
+```
+
+Caveats learned the hard way: `rtl_power` cycles through all windows many
+times per integration interval (~30 ms per visit), so it never sees short
+bursts even in peak-hold mode; and the burst detector fires on continuous
+noise-like signals whose per-bin power flickers (weak FM stations, dithered
+switching supplies) — the report cross-references the sweeps to flag those.
 
 `sensormon_core::{Event, Reception, Signal, Payload, ...}` are the types to
 import from home automation code (`Payload` is an enum: `Ws90`, `Wh51`,
@@ -160,6 +184,11 @@ receiver's band and SNR, and `retuned to …` on every hop.
   `FskParams`); a CFAR threshold from the measured noise statistics and
   limits derived from the decoder set are the planned follow-ups, as is a
   slow AGC on SDR gain.
+- The detector keys on power over a slowly tracked floor, so a continuous
+  signal whose spectrum flickers (FM modulation, spread-spectrum SMPS
+  harmonics, 8-VSB) produces spurious 3–10 ms "bursts". A variance-aware
+  (CFAR) floor would fix it; see `tools/rf-survey/` for how the survey
+  reports work around it meanwhile.
 - FSK only; no OOK decoders yet.
 - No golden-fixture test on the corpus yet (verification is manual
   `decode-file --summary` against the numbers above).

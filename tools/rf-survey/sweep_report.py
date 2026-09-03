@@ -51,6 +51,47 @@ def known(mhz):
                 return f"ATSC pilot, TV channel {ch0 + i}"
     return ""
 
+def find_combs(centers_mhz, weights, exclude=None, max_combs=3, tol=0.0015):
+    """Greedy search for fundamentals f0 (2–60 MHz) whose integer harmonics explain many of the given
+    centers (switching-supply / clock combs). Returns ([(f0, n_members)], membership) where membership[i]
+    is (f0, k) or None. `exclude[i]` = True keeps a center out of the search (already explained)."""
+    import numpy as np
+    centers = np.asarray(centers_mhz, float)
+    weights = np.asarray(weights, float)
+    unexplained = np.ones(len(centers), bool) if exclude is None else ~np.asarray(exclude, bool)
+    membership = [None] * len(centers)
+    combs = []
+    def hits(f0s, c):
+        k = np.round(c[None, :] / f0s[:, None])
+        tolerance = np.minimum(tol * c[None, :], 0.03 * f0s[:, None])
+        return (np.abs(c[None, :] - k * f0s[:, None]) <= tolerance) & (k >= 2) & (k <= 150)
+
+    for _ in range(max_combs):
+        c = centers[unexplained]; w = weights[unexplained]
+        if len(c) < 5:
+            break
+        # coarse pass 2–200 MHz, then refine around the winner; sub-harmonics score as well, so take
+        # the largest f0 within 90% of the best score
+        f0s = np.arange(2.0, 200.0, 0.002)
+        score = (hits(f0s, c) * w[None, :]).sum(axis=1)
+        if score.max() <= 0:
+            break
+        coarse = float(f0s[np.where(score >= 0.9 * score.max())[0][-1]])
+        f0s = np.arange(coarse - 0.01, coarse + 0.01, 0.0001)
+        hit = hits(f0s, c)
+        score = (hit * w[None, :]).sum(axis=1)
+        best = int(np.where(score >= 0.95 * score.max())[0][-1])
+        f0 = float(f0s[best])
+        members = np.where(unexplained)[0][hit[best]]
+        if len(members) < 5 or len({int(round(centers[i] / f0)) for i in members}) < 6:
+            break
+        for i in members:
+            membership[i] = (f0, int(round(centers[i] / f0)))
+        unexplained[members] = False
+        combs.append((f0, len(members)))
+    return combs, membership
+
+
 def harmonic_note(f_mhz, peaks_mhz):
     """If f is within 30 kHz of k× another (weaker or stronger) peak, say so."""
     for g in peaks_mhz:
@@ -116,15 +157,27 @@ def main():
     sigs.sort(key=lambda s: -s["peak"])
     print(f"# RF survey — {len(files)} sweep files, {len(freqs)} bins of {step/1e3:.0f} kHz, {freqs[0]/1e6:.1f}–{freqs[-1]/1e6:.1f} MHz\n")
     print("Levels are dB above the local noise floor (20th percentile of the median spectrum over ±1 MHz). 'median' = present in most sweeps (continuous); 'peak' = strongest seen (bursty if peak ≫ median).\n")
+    peaks_mhz = [s["peak_at"] / 1e6 for s in sigs[: max(a.top, 200)]]
+    cand = sigs[: max(a.top, 300)]
+    combs, membership = find_combs([s["peak_at"] / 1e6 for s in cand], [s["peak"] for s in cand],
+                                   exclude=[bool(known(s["peak_at"] / 1e6)) for s in cand])
+    for s, mem in zip(cand, membership):
+        s["comb"] = mem
+    if combs:
+        print("Harmonic combs found among the strongest signals (switching-supply / clock harmonics radiated by nearby electronics, not over-the-air signals):\n")
+        for f0, n in combs:
+            ks = sorted({s["comb"][1] for s in cand if s.get("comb") and abs(s["comb"][0] - f0) < 1e-9})
+            print(f"- **{f0:.4f} MHz** × {ks[0]}…{ks[-1]} ({n} signals, {ks[0]*f0:.1f}–{ks[-1]*f0:.1f} MHz)")
+        print()
     print("## Strongest signals\n")
     print("| MHz (peak) | span MHz | peak dB | median dB | character | band | note |")
     print("|---|---|---|---|---|---|---|")
-    peaks_mhz = [s["peak_at"] / 1e6 for s in sigs[: max(a.top, 200)]]
     for s in sigs[: a.top]:
         f = s["peak_at"] / 1e6
         ch = "continuous" if s["med"] >= a.thr else ("intermittent" if s["med"] >= a.thr / 2 else "bursty")
         span = f"{s['lo']/1e6:.2f}–{s['hi']/1e6:.2f}" if s["hi"] > s["lo"] else f"{s['lo']/1e6:.2f}"
-        notes = [x for x in (known(f), harmonic_note(f, peaks_mhz)) if x]
+        comb = f"{s['comb'][1]}× {s['comb'][0]:.4f} MHz comb" if s.get("comb") else ""
+        notes = [x for x in (known(f), comb, harmonic_note(f, peaks_mhz) if not comb else "") if x]
         print(f"| {f:.3f} | {span} | {s['peak']:.0f} | {s['med']:.0f} | {ch} | {band_of(f)} | {'; '.join(notes)} |")
     # occupancy per allocation band
     print("\n## Occupancy by band (fraction of bins ever ≥ threshold, and max level)\n")

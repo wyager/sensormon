@@ -136,6 +136,7 @@ impl Runtime {
                 // wasn't being received.
                 let mut pipelines: HashMap<u64, (Pipeline, SampleIndex)> = HashMap::new();
                 let mut lru: Vec<u64> = Vec::new(); // most recently used last
+                let mut evicted = PipelineStats::default(); // counters of bands no longer resident
                 let mut global = SampleIndex(0);
                 let mut current: Option<u64> = None;
                 let mut settle_left: u64 = 0;
@@ -155,7 +156,14 @@ impl Runtime {
                     }
                     if !pipelines.contains_key(&key) && pipelines.len() >= max_bands {
                         if let Some(old) = lru.first().copied() {
-                            pipelines.remove(&old);
+                            if let Some((p, _)) = pipelines.remove(&old) {
+                                let st = p.stats();
+                                evicted.samples += st.samples;
+                                evicted.bursts += st.bursts;
+                                evicted.bursts_lost_from_ring += st.bursts_lost_from_ring;
+                                evicted.demodulated += st.demodulated;
+                                evicted.decoded_frames += st.decoded_frames;
+                            }
                             lru.remove(0);
                         }
                     }
@@ -182,7 +190,7 @@ impl Runtime {
                     global = global.offset(n as i64);
                     *seen_upto = global;
                     blocks += 1;
-                    let mut total = PipelineStats::default();
+                    let mut total = evicted;
                     for (p, _) in pipelines.values() {
                         let st = p.stats();
                         total.samples += st.samples;
