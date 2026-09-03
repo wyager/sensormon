@@ -21,6 +21,9 @@ pub struct ChirpStoreConfig {
     /// Newest examples kept per group.
     #[serde(default = "default_examples")]
     pub max_examples_per_group: i64,
+    /// Only record these receivers (empty = all).
+    #[serde(default)]
+    pub receivers: Vec<String>,
 }
 fn default_max_bytes() -> i64 {
     50_000_000

@@ -30,7 +30,15 @@ pub struct ReceiverConfig {
     pub hop_hz: Vec<f64>,
     #[serde(default = "default_dwell")]
     pub dwell_s: f64,
+    /// Per-band pipelines kept alive (LRU); a band evicted and revisited
+    /// re-learns its noise floor in a few ms. Default 8.
+    #[serde(default = "default_max_bands")]
+    pub max_band_pipelines: usize,
     pub sample_rate: u32,
+}
+
+fn default_max_bands() -> usize {
+    8
 }
 
 fn default_dwell() -> f64 {

@@ -111,7 +111,7 @@ impl Runtime {
             }
             None => None,
         };
-        let keep_chirps = chirps.is_some();
+        let chirp_receivers: Vec<String> = cfg.chirps.as_ref().map(|c| c.receivers.clone()).unwrap_or_default();
         let mut receivers = Vec::new();
         for rc in &cfg.receivers {
             let source = make_source(rc)?;
@@ -125,6 +125,8 @@ impl Runtime {
             let ev_tx = rx_events_tx.clone();
             let name = rc.name.clone();
             let chirp_tx = chirp_tx.clone();
+            let keep_chirps = chirps.is_some() && (chirp_receivers.is_empty() || chirp_receivers.contains(&rc.name));
+            let max_bands = rc.max_band_pipelines.max(1);
             // Samples to discard after a retune while the PLL settles and the old band's tail flushes.
             let settle = rate.samples_in(0.06) as u64;
             std::thread::Builder::new().name(format!("rx-{name}")).spawn(move || {
@@ -133,6 +135,7 @@ impl Runtime {
                 // SDR produced, so a band's pipeline can skip forward over the time it
                 // wasn't being received.
                 let mut pipelines: HashMap<u64, (Pipeline, SampleIndex)> = HashMap::new();
+                let mut lru: Vec<u64> = Vec::new(); // most recently used last
                 let mut global = SampleIndex(0);
                 let mut current: Option<u64> = None;
                 let mut settle_left: u64 = 0;
@@ -150,6 +153,14 @@ impl Runtime {
                         global = global.offset(n as i64);
                         continue;
                     }
+                    if !pipelines.contains_key(&key) && pipelines.len() >= max_bands {
+                        if let Some(old) = lru.first().copied() {
+                            pipelines.remove(&old);
+                            lru.remove(0);
+                        }
+                    }
+                    lru.retain(|k| *k != key);
+                    lru.push(key);
                     let (pipeline, seen_upto) = pipelines.entry(key).or_insert_with(|| {
                         let mut p = Pipeline::new(receiver_id.clone(), rate, Hertz(block.center_hz), PipelineConfig::default(), Utc::now());
                         p.set_keep_undecoded(keep_chirps);

@@ -82,7 +82,7 @@ fn main() -> Result<()> {
             let mut store = match &chirps_db {
                 Some(path) => {
                     pipeline.set_keep_undecoded(true);
-                    Some(chirps::ChirpStore::open(chirps::ChirpStoreConfig { path: path.display().to_string(), max_bytes: 50_000_000, max_examples_per_group: 6 })?)
+                    Some(chirps::ChirpStore::open(chirps::ChirpStoreConfig { path: path.display().to_string(), max_bytes: 50_000_000, max_examples_per_group: 6, receivers: Vec::new() })?)
                 }
                 None => None,
             };
