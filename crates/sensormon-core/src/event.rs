@@ -28,11 +28,12 @@ pub struct Signal {
     pub f_space: Hertz,
     /// Measured symbol rate after timing recovery.
     pub symbol_rate: Hertz,
-    /// Burst power relative to full scale.
+    /// Power of the strongest FSK tone, dBFS, referred to one symbol-rate bandwidth.
     pub rssi: Db,
-    /// Burst power over the noise floor in the burst's own bandwidth.
+    /// `rssi - noise`: a matched-filter style SNR (the figure that predicts decodability).
+    /// Reads ~10 dB higher than rtl_433's envelope-over-full-bandwidth SNR for the same signal.
     pub snr: Db,
-    /// Noise floor (dBFS per bin) at the burst's frequency at the time.
+    /// Tracked noise floor at the burst's frequency, dBFS in one symbol-rate bandwidth.
     pub noise: Db,
 }
 

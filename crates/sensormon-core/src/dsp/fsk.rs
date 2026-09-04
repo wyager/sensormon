@@ -8,7 +8,6 @@
 //! 5. Slice d at the lattice midpoints.
 
 use super::extract::Baseband;
-use super::power_dbfs;
 use crate::units::{Db, Hertz, SampleIndex};
 use rustfft::{num_complex::Complex, FftPlanner};
 use std::f32::consts::PI;
@@ -41,8 +40,11 @@ pub struct Symbols {
     pub f_mark: Hertz,
     pub f_space: Hertz,
     pub symbol_rate: Hertz,
+    /// Strongest tone's power, dBFS, referred to one symbol-rate bandwidth.
     pub rssi: Db,
+    /// `rssi - noise`.
     pub snr: Db,
+    /// Tracked noise floor at the burst's frequency, dBFS in one symbol-rate bandwidth.
     pub noise: Db,
 }
 
@@ -263,7 +265,12 @@ pub fn demod_fsk_with_tones(bb: &Baseband, p: &FskParams, tones: Tones) -> Optio
         bits.push(d[i as usize] > 0.0);
     }
     let t_first = t_first?;
-    let rssi = power_dbfs(&bb.iq[first_on..=last_on]);
+    // rssi/noise/snr share one convention: power of the strongest tone (dBFS) and the tracked
+    // noise floor scaled to one symbol-rate bandwidth, so `snr == rssi - noise` always holds and
+    // all three are comparable across sample rates and receivers. (rtl_433 reported the envelope
+    // level over the full sample-rate bandwidth instead, which reads ~10 dB lower for the same
+    // signal; the old wideband burst power is still available as `power_dbfs` on the baseband.)
+    let rssi = peak;
     Some(Symbols {
         bits,
         t0: bb.start.offset((t_first as f64 * bb.decim as f64) as i64),

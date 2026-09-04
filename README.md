@@ -67,7 +67,7 @@ the decoders that can occur there.
 Event shape (control plane and data plane kept apart):
 
 ```json
-{"reception":{"time":"2026-09-02T02:40:07.184Z","heard_by":{"garage-nesdr":{"center":915001234.0,"f_mark":915031000.0,"f_space":914962000.0,"symbol_rate":17246.0,"rssi":-52.0,"snr":41.0,"noise":-51.0}}},
+{"reception":{"time":"2026-09-02T02:40:07.184Z","heard_by":{"garage-nesdr":{"center":915001234.0,"f_mark":915031000.0,"f_space":914962000.0,"symbol_rate":17246.0,"rssi":-10.0,"snr":41.0,"noise":-51.0}}},
  "sensor":{"model":"Fineoffset-WS90","id":68507,"battery_mv":2460,"temperature_c":33.5,"humidity_pct":50,...},
  "raw":[144,1,11,155,...]}
 ```
