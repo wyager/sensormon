@@ -24,6 +24,23 @@ pub struct ChirpStoreConfig {
     /// Only record these receivers (empty = all).
     #[serde(default)]
     pub receivers: Vec<String>,
+    /// Newest examples kept per emitter family (`Chirp::family`: receiver,
+    /// bandwidth/duration/tone-spacing/symbol-rate classes, any center), so a
+    /// frequency hopper can't fill the store. Default 50.
+    #[serde(default = "default_family_examples")]
+    pub max_examples_per_family: i64,
+    /// Receiver-side admission: at most one example per family per this many
+    /// seconds reaches the store (group counts are unaffected). Default 10 s.
+    #[serde(default = "default_family_interval")]
+    pub min_family_interval_s: f64,
+}
+
+fn default_family_examples() -> i64 {
+    50
+}
+
+fn default_family_interval() -> f64 {
+    10.0
 }
 fn default_max_bytes() -> i64 {
     50_000_000
@@ -91,15 +108,7 @@ pub struct ChirpStore {
     total_bytes: i64,
 }
 
-fn duration_class_ms(ms: f64) -> i64 {
-    // log-ish classes: 3,5,10,20,40,80,160,320
-    for c in [3, 5, 10, 20, 40, 80, 160, 320] {
-        if ms <= c as f64 {
-            return c;
-        }
-    }
-    640
-}
+use sensormon_core::pipeline::duration_class_ms;
 
 impl ChirpStore {
     pub fn open(cfg: ChirpStoreConfig) -> Result<Self> {
@@ -125,6 +134,12 @@ impl ChirpStore {
              CREATE INDEX IF NOT EXISTS chirps_group ON chirps(group_id, id);
              CREATE INDEX IF NOT EXISTS chirps_time ON chirps(time);",
         )?;
+        // family column (added 2026-09-05); older stores get it on open
+        let has_family: bool = conn.prepare("PRAGMA table_info(chirps)")?.query_map([], |r| r.get::<_, String>(1))?.filter_map(|r| r.ok()).any(|c| c == "family");
+        if !has_family {
+            conn.execute_batch("ALTER TABLE chirps ADD COLUMN family TEXT NOT NULL DEFAULT ''")?;
+        }
+        conn.execute_batch("CREATE INDEX IF NOT EXISTS chirps_family ON chirps(family, id);")?;
         let total_bytes: i64 = conn.query_row("SELECT COALESCE(SUM(bytes),0) FROM chirps", [], |r| r.get(0))?;
         Ok(ChirpStore { conn, cfg, total_bytes })
     }
@@ -133,7 +148,8 @@ impl ChirpStore {
         let t = c.time.timestamp() as f64 + c.time.timestamp_subsec_micros() as f64 / 1e6;
         let center = c.burst.center().0;
         let bw = c.burst.bandwidth().0;
-        let dur_ms = c.burst.start.distance_to(c.burst.end) as f64 / (c.baseband.sample_rate.hz() * c.baseband.decim as f64) * 1e3;
+        let dur_ms = c.duration_ms();
+        let family = c.family();
         let snr = (c.burst.peak.0 - c.burst.noise.0) as f64;
         let (f_mark, f_space, rate, bits) = match (&c.tones, &c.symbols) {
             (Some(tn), Some(sy)) => (Some(c.baseband.center.0 + tn.f_mark), Some(c.baseband.center.0 + tn.f_space), Some(sy.symbol_rate.0), Some(sy.bits.iter().map(|&b| if b { '1' } else { '0' }).collect::<String>())),
@@ -181,14 +197,26 @@ impl ChirpStore {
         }
         let bytes = iq.len() as i64;
         tx.execute(
-            "INSERT INTO chirps (group_id, receiver, time, center_hz, bandwidth_hz, duration_ms, peak_db, noise_db, snr_db, f_mark_hz, f_space_hz, symbol_rate, bits, sample_rate, samples, bytes, iq) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
-            params![group_id, c.receiver.0, t, center, bw, dur_ms, c.burst.peak.0 as f64, c.burst.noise.0 as f64, snr, f_mark, f_space, rate, bits, c.baseband.sample_rate.0 as i64, c.baseband.iq.len() as i64, bytes, iq],
+            "INSERT INTO chirps (group_id, receiver, time, center_hz, bandwidth_hz, duration_ms, peak_db, noise_db, snr_db, f_mark_hz, f_space_hz, symbol_rate, bits, sample_rate, samples, bytes, iq, family) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+            params![group_id, c.receiver.0, t, center, bw, dur_ms, c.burst.peak.0 as f64, c.burst.noise.0 as f64, snr, f_mark, f_space, rate, bits, c.baseband.sample_rate.0 as i64, c.baseband.iq.len() as i64, bytes, iq, family],
         )?;
         self.total_bytes += bytes;
         // per-group cap: drop this group's oldest examples
         let freed: i64 = {
             let mut stmt = tx.prepare("SELECT id, bytes FROM chirps WHERE group_id=?1 ORDER BY id DESC LIMIT -1 OFFSET ?2")?;
             let old: Vec<(i64, i64)> = stmt.query_map(params![group_id, self.cfg.max_examples_per_group], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?;
+            let mut freed = 0;
+            for (id, b) in old {
+                tx.execute("DELETE FROM chirps WHERE id=?1", params![id])?;
+                freed += b;
+            }
+            freed
+        };
+        self.total_bytes -= freed;
+        // per-family cap: a hopper's many groups share one budget
+        let freed: i64 = {
+            let mut stmt = tx.prepare("SELECT id, bytes FROM chirps WHERE family=?1 ORDER BY id DESC LIMIT -1 OFFSET ?2")?;
+            let old: Vec<(i64, i64)> = stmt.query_map(params![family, self.cfg.max_examples_per_family], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?;
             let mut freed = 0;
             for (id, b) in old {
                 tx.execute("DELETE FROM chirps WHERE id=?1", params![id])?;

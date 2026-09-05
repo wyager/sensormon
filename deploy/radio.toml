@@ -28,3 +28,6 @@ bind = "0.0.0.0:8433"
 path = "/var/lib/sensormon/chirps.db"
 max_bytes = 500_000_000
 max_examples_per_group = 3
+# per emitter family (any center): ≤50 examples kept, ≤1 forwarded per 10 s per receiver thread
+max_examples_per_family = 50
+min_family_interval_s = 10

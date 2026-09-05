@@ -94,7 +94,10 @@ impl Runtime {
         let (events_tx, _) = broadcast::channel::<Arc<Event>>(256);
         let (rx_events_tx, rx_events_rx) = mpsc::channel::<ReceiverEvent>();
         // Undecoded bursts go to one writer thread so the receiver threads never touch SQLite.
-        let (chirp_tx, chirp_rx) = mpsc::sync_channel::<sensormon_core::pipeline::Chirp>(256);
+        // Bounded so a slow disk can't grow memory; per-family admission below keeps a
+        // hopper from filling it, so no receiver starves (that happened at 256 slots
+        // once the store hit its cap and the writer slowed down).
+        let (chirp_tx, chirp_rx) = mpsc::sync_channel::<sensormon_core::pipeline::Chirp>(1024);
         let chirps = match &cfg.chirps {
             Some(cc) => {
                 let store = Arc::new(Mutex::new(crate::chirps::ChirpStore::open(cc.clone()).context("open chirp store")?));
@@ -112,6 +115,7 @@ impl Runtime {
             None => None,
         };
         let chirp_receivers: Vec<String> = cfg.chirps.as_ref().map(|c| c.receivers.clone()).unwrap_or_default();
+        let family_interval = cfg.chirps.as_ref().map(|c| c.min_family_interval_s).unwrap_or(0.0);
         let mut receivers = Vec::new();
         for rc in &cfg.receivers {
             let source = make_source(rc)?;
@@ -136,6 +140,9 @@ impl Runtime {
                 // wasn't being received.
                 let mut pipelines: HashMap<u64, (Pipeline, SampleIndex)> = HashMap::new();
                 let mut lru: Vec<u64> = Vec::new(); // most recently used last
+                // per-family admission: last time an example of each family was sent
+                let mut family_last: HashMap<String, std::time::Instant> = HashMap::new();
+                let mut family_sweep = std::time::Instant::now();
                 let mut evicted = PipelineStats::default(); // counters of bands no longer resident
                 let mut global = SampleIndex(0);
                 let mut current: Option<u64> = None;
@@ -185,6 +192,18 @@ impl Runtime {
                         let _ = ev_tx.send(ev);
                     }
                     for c in pipeline.take_chirps() {
+                        let now = std::time::Instant::now();
+                        if family_interval > 0.0 {
+                            let fam = c.family();
+                            if family_last.get(&fam).is_some_and(|t| now.duration_since(*t).as_secs_f64() < family_interval) {
+                                continue;
+                            }
+                            family_last.insert(fam, now);
+                            if now.duration_since(family_sweep).as_secs() > 600 {
+                                family_last.retain(|_, t| now.duration_since(*t).as_secs_f64() < 10.0 * family_interval);
+                                family_sweep = now;
+                            }
+                        }
                         let _ = chirp_tx.try_send(c); // full queue: drop rather than stall the receiver
                     }
                     global = global.offset(n as i64);

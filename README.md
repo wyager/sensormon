@@ -93,8 +93,17 @@ GET /chirps/<id>/iq               raw cs8; X-Sample-Rate / X-Center-Hz headers
 An example can be fed straight to rtl_433 to try its ~250 decoders:
 `rtl_433 -r chirp.cs8 -s <sample_rate> -f <center>` (also `-A` to analyse).
 `decode-file --chirps-db path` does the same offline. `[chirps] receivers =
-["name", ...]` restricts recording to some receivers (a busy 915 MHz meter
-mesh at the tower churns a 50 MB store in under two minutes).
+["name", ...]` restricts recording to some receivers.
+
+Bursts also belong to an **emitter family** (`Chirp::family`: receiver,
+bandwidth class, duration class, FSK tone-spacing class, symbol-rate class,
+any center), so a frequency hopper is one family however many channels it
+uses. Two budgets keep a busy family (the 915 MHz AMI mesh at the tower does
+~20 bursts/s) from owning the store: the receiver thread forwards at most one
+example per family per `min_family_interval_s` (default 10 s; this is also
+what keeps the writer queue from starving the other receivers), and the store
+keeps at most `max_examples_per_family` (default 50) examples per family.
+Group counts are unaffected by either.
 
 ### RF survey mode
 
@@ -184,11 +193,14 @@ receiver's band and SNR, and `retuned to …` on every hop.
   `FskParams`); a CFAR threshold from the measured noise statistics and
   limits derived from the decoder set are the planned follow-ups, as is a
   slow AGC on SDR gain.
-- The detector keys on power over a slowly tracked floor, so a continuous
-  signal whose spectrum flickers (FM modulation, spread-spectrum SMPS
-  harmonics, 8-VSB) produces spurious 3–10 ms "bursts". A variance-aware
-  (CFAR) floor would fix it; see `tools/rf-survey/` for how the survey
-  reports work around it meanwhile.
+- Region opening is variance-aware (CFAR-style, since 2026-09-05): each bin
+  tracks the spread of its sub-threshold excursions and a new region needs
+  `p > floor · max(open_ratio, 1 + k·σ)` (`variance_k` = 30, `variance_alpha`
+  = 0.002). Noise bins (σ ≈ 0.58) are unaffected; flickering bins (weak FM
+  stations, dithered SMPS harmonics, 8-VSB) need a proportionally larger
+  excursion. On 3 s NESDR captures of the FM/TV/UHF bands the spurious burst
+  count went 21/113/101 → 0/27/11 with all 25 corpus frames still decoded;
+  detect-stage cost +~15% (≈0.2% of a core per receiver).
 - FSK only; no OOK decoders yet.
 - No golden-fixture test on the corpus yet (verification is manual
   `decode-file --summary` against the numbers above).

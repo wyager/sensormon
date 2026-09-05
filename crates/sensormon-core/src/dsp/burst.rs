@@ -36,6 +36,16 @@ pub struct BurstDetectorConfig {
     /// A region's edges are the outermost bins within this much of its peak, so
     /// leakage/splatter from a strong burst doesn't inflate its bandwidth.
     pub dynamic_range: Db,
+    /// Variance-aware opening (CFAR-style): besides `open_threshold`, a new
+    /// region needs `p > floor * (1 + variance_k * sigma)` where `sigma` is the
+    /// bin's tracked standard deviation of `(p - floor) / floor`. For noise
+    /// (3-bin smoothed power, Gamma(3)) sigma ≈ 0.58, so with k = 25 the extra
+    /// term (1 + 14.4 → 11.9 dB) sits below `open_threshold` and changes
+    /// nothing; a bin that flickers (FM modulation, dithered SMPS harmonics,
+    /// 8-VSB) has sigma of several and demands a proportionally larger excursion.
+    pub variance_k: f32,
+    /// EMA rate of the variance tracker per hop (0.002 ≈ 50 ms at 0.1 ms hops).
+    pub variance_alpha: f32,
 }
 
 impl Default for BurstDetectorConfig {
@@ -52,6 +62,8 @@ impl Default for BurstDetectorConfig {
             max_bandwidth: Hertz::khz(1200.0), // a clipped strong burst splatters far; extraction re-narrows it
             dc_guard_bins: 2,
             dynamic_range: Db(25.0),
+            variance_k: 30.0,
+            variance_alpha: 0.002,
         }
     }
 }
@@ -99,6 +111,11 @@ pub struct BurstDetector {
     scratch: Vec<Complex<f32>>,
     /// Tracked noise floor per bin, linear power (arithmetic mean of non-burst hops).
     floor: Vec<f32>,
+    /// Tracked variance per bin of the relative excursion `(p - floor) / floor`
+    /// (clipped at +30 so one strong burst can't blind its bin for long).
+    var: Vec<f32>,
+    /// Per-bin opening ratio this hop: `max(r_open, 1 + k * sqrt(var))`.
+    open_ratio: Vec<f32>,
     /// Threshold ratios derived once from the dB config (see `ratios`).
     r_hot: f32,
     r_open: f32,
@@ -160,6 +177,8 @@ impl BurstDetector {
             window,
             scratch: vec![Complex::new(0.0, 0.0); n],
             floor: vec![1e-10; n],
+            var: vec![1.0 / 3.0; n],
+            open_ratio: vec![r_open; n],
             r_hot,
             r_open,
             trim_ratio,
@@ -255,11 +274,21 @@ impl BurstDetector {
             return;
         }
         let trace_bin = self.trace_bin;
-        let (r_hot, rise_cap) = (self.r_hot, self.rise_cap);
+        let (r_hot, r_open, rise_cap) = (self.r_hot, self.r_open, self.rise_cap);
+        let (var_k, var_alpha) = (self.cfg.variance_k, self.cfg.variance_alpha);
         for k in 0..n {
             let f = self.floor[k];
             let p = self.s_lin[k];
             let is_hot = p > f * r_hot;
+            // Variance of the relative excursion, tracked only while the bin is not
+            // hot: a genuine burst must not blind its own bin afterwards, while a
+            // flickering bin (FM modulation, dithered SMPS line) shows its spread in
+            // the sub-threshold samples too (noise: e in [-1, ~3], var ≈ 1/3).
+            if !is_hot {
+                let e = (p - f) / f;
+                self.var[k] += (e * e - self.var[k]) * var_alpha;
+            }
+            self.open_ratio[k] = r_open.max(1.0 + var_k * self.var[k].sqrt());
             self.hot_streak[k] = if is_hot { self.hot_streak[k] + 1 } else { 0 };
             let carrier = self.hot_streak[k] as u64 > max_hops;
             // Floor tracker: exponential average toward the current level, with the
@@ -276,7 +305,7 @@ impl BurstDetector {
         // group hot bins into regions, bridging gaps up to merge_gap
         let gap_bins = (self.cfg.merge_gap.0 / self.bin_hz()).round() as usize;
         let mut regions: Vec<(usize, usize, f32, f32)> = Vec::new(); // lo, hi, peak_db, noise_db
-        let (hot, s_lin, floor) = (&self.hot, &self.s_lin, &self.floor);
+        let (hot, s_lin, floor, open_ratio) = (&self.hot, &self.s_lin, &self.floor, &self.open_ratio);
         let mut k = 0;
         while k < n {
             if hot[k] {
@@ -298,7 +327,9 @@ impl BurstDetector {
                 let lo_t = (lo..=hi).find(|&b| hot[b] && s_lin[b] >= cut).unwrap_or(lo);
                 let hi_t = (lo..=hi).rev().find(|&b| hot[b] && s_lin[b] >= cut).unwrap_or(hi);
                 let noise = floor[lo_t..=hi_t].iter().cloned().fold(f32::INFINITY, f32::min);
-                if peak > noise * self.r_open || self.active.iter().any(|a| lo_t <= a.hi_bin && a.lo_bin <= hi_t) {
+                // opening needs the peak bin to clear its own variance-aware ratio
+                let opens = (lo_t..=hi_t).any(|b| hot[b] && s_lin[b] > floor[b] * open_ratio[b]) && peak > noise * self.r_open;
+                if opens || self.active.iter().any(|a| lo_t <= a.hi_bin && a.lo_bin <= hi_t) {
                     // dB only per region (a handful per hop), never per bin
                     regions.push((lo_t, hi_t, to_db(peak), to_db(noise)));
                 }

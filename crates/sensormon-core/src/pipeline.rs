@@ -67,6 +67,33 @@ pub struct Chirp {
     pub symbols: Option<Symbols>,
 }
 
+/// Duration classes for grouping bursts: 3,5,10,20,40,80,160,320,640 ms.
+pub fn duration_class_ms(ms: f64) -> i64 {
+    for c in [3, 5, 10, 20, 40, 80, 160, 320] {
+        if ms <= c as f64 {
+            return c;
+        }
+    }
+    640
+}
+
+impl Chirp {
+    pub fn duration_ms(&self) -> f64 {
+        self.burst.start.distance_to(self.burst.end) as f64 / (self.baseband.sample_rate.hz() * self.baseband.decim as f64) * 1e3
+    }
+    /// Emitter family, ignoring center frequency: receiver, bandwidth class
+    /// (25 kHz), duration class, FSK tone spacing class (10 kHz) and symbol
+    /// rate class (1 kbaud). A frequency hopper is one family; the chirp store
+    /// caps examples per family and the receiver thread rate-limits per family.
+    pub fn family(&self) -> String {
+        let bw = ((self.burst.bandwidth().0 / 25e3).round() as i64).max(1) * 25;
+        let dur = duration_class_ms(self.duration_ms());
+        let spacing = self.tones.map(|t| ((t.f_mark - t.f_space) / 10e3).round() as i64 * 10);
+        let rate = self.symbols.as_ref().map(|s| (s.symbol_rate.0 / 1e3).round() as i64);
+        format!("{}|{}|{}|{}|{}", self.receiver.0, bw, dur, spacing.map(|v| v.to_string()).unwrap_or_default(), rate.map(|v| v.to_string()).unwrap_or_default())
+    }
+}
+
 pub struct Pipeline {
     receiver: ReceiverId,
     rate: SampleRate,
