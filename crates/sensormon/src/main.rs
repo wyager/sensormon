@@ -146,31 +146,43 @@ fn run(config_path: &std::path::Path) -> Result<()> {
         let stalled = std::sync::Arc::new(std::sync::Mutex::new(runtime::Stalled::default()));
         let app = http::router(http::AppState { runtime: runtime.clone(), events: events.clone(), chirps, stalled: stalled.clone() });
         // Stall watchdog: an SDR that drops off USB leaves its driver silently idle
-        // and the process would run forever decoding nothing. Exit non-zero so
-        // systemd (Restart=always) brings us back and re-opens the devices.
+        // and the receiver would sit forever decoding nothing. After STALL_TIMEOUT
+        // without samples the receiver's supervisor re-opens the device; if that
+        // still yields nothing for STALL_GIVE_UP, exit so systemd restarts us.
         {
             let runtime = runtime.clone();
             let stalled = stalled.clone();
             std::thread::Builder::new().name("watchdog".into()).spawn(move || {
-                let mut last: std::collections::HashMap<String, (u64, std::time::Instant)> = std::collections::HashMap::new();
+                // per receiver: (last block count, when it last advanced, stalled since)
+                let mut last: std::collections::HashMap<String, (u64, std::time::Instant, Option<std::time::Instant>)> = std::collections::HashMap::new();
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(3));
                     let now = std::time::Instant::now();
-                    let counters = runtime.lock().unwrap().block_counters();
+                    let (counters, unavailable) = {
+                        let rt = runtime.lock().unwrap();
+                        (rt.block_counters(), rt.unavailable())
+                    };
+                    last.retain(|n, _| counters.iter().any(|(c, _)| c == n)); // a re-opened source starts a fresh clock
                     let mut dead = Vec::new();
                     for (name, blocks) in counters {
-                        let e = last.entry(name.clone()).or_insert((blocks, now));
+                        let e = last.entry(name.clone()).or_insert((blocks, now, None));
                         if blocks != e.0 {
-                            *e = (blocks, now);
+                            *e = (blocks, now, None);
                         } else if now.duration_since(e.1) >= runtime::STALL_TIMEOUT {
+                            let since = *e.2.get_or_insert(now);
+                            if now.duration_since(since) >= runtime::STALL_GIVE_UP {
+                                eprintln!("watchdog: {name} still without samples {:?} after re-opening; exiting for a full restart", now.duration_since(since));
+                                std::process::exit(3);
+                            }
+                            eprintln!("watchdog: no samples from {name} for {:?}; re-opening its source", now.duration_since(e.1));
+                            runtime.lock().unwrap().request_restart(&name);
+                            e.1 = now; // give the re-open a full STALL_TIMEOUT before asking again
                             dead.push(name);
+                        } else if e.2.is_some() {
+                            dead.push(name); // still recovering
                         }
                     }
-                    *stalled.lock().unwrap() = runtime::Stalled { receivers: dead.clone() };
-                    if !dead.is_empty() {
-                        eprintln!("watchdog: no samples from {} for {:?}; exiting for restart", dead.join(", "), runtime::STALL_TIMEOUT);
-                        std::process::exit(3);
-                    }
+                    *stalled.lock().unwrap() = runtime::Stalled { receivers: dead, unavailable };
                 }
             }).expect("spawn watchdog");
         }

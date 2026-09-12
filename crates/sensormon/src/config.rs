@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::Path;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(rename = "receiver")]
@@ -17,7 +17,7 @@ pub struct Config {
     pub chirps: Option<crate::chirps::ChirpStoreConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ReceiverConfig {
     pub name: String,
     #[serde(flatten)]
@@ -56,7 +56,7 @@ impl ReceiverConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum ReceiverKind {
     Airspy {
@@ -116,7 +116,7 @@ pub enum FileFormat {
     Cs16,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MergeConfig {
     pub window_ms: u64,
@@ -128,7 +128,7 @@ impl Default for MergeConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HttpConfig {
     pub bind: String,

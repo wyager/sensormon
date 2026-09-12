@@ -5,7 +5,7 @@ use crate::config::{AirspyGain, Config, FileFormat, ReceiverConfig, ReceiverKind
 use crate::filesource::FileSource;
 use crate::iqfile::Format;
 use crate::sdr::{airspy::AirspySource, rtlsdr::RtlsdrSource};
-use crate::source::{Block, BlockSink, IqSource, RunningSource, SourceCounters};
+use crate::source::{Block, BlockSink, IqSource, SourceCounters};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use sensormon_core::merge::Merger;
@@ -13,7 +13,7 @@ use sensormon_core::pipeline::{Pipeline, PipelineConfig, PipelineStats};
 use sensormon_core::{Event, Hertz, ReceiverEvent, ReceiverId, SampleIndex, SampleRate};
 use serde::Serialize;
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -57,7 +57,27 @@ struct ReceiverHandle {
     /// File sources legitimately stop at end of file; only live SDRs are watched.
     watchdog: bool,
     stats: Arc<Mutex<(PipelineStats, f64)>>,
-    running: Option<Box<dyn RunningSource>>,
+    /// True while the supervisor has the device open and streaming.
+    open: Arc<AtomicBool>,
+    /// Set by the watchdog to make the supervisor stop and re-open the source.
+    restart: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
+    /// Owns the source lifecycle: open → stream → (restart | shutdown) → stop → loop.
+    supervisor: Option<std::thread::JoinHandle<()>>,
+}
+
+/// How long a receiver whose device can't be opened waits before trying again.
+const REOPEN_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Sleep in small steps so shutdown/restart requests are noticed promptly.
+fn sleep_until(d: Duration, wake: &dyn Fn() -> bool) {
+    let deadline = std::time::Instant::now() + d;
+    while std::time::Instant::now() < deadline {
+        if wake() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
 }
 
 pub struct Runtime {
@@ -67,16 +87,22 @@ pub struct Runtime {
 }
 
 /// A receiver that has delivered no samples for this long is considered
-/// stalled. An SDR that drops off USB (and comes back) leaves libairspy /
-/// librtlsdr silently idle: the process stays "active" while decoding nothing,
-/// which is exactly what happened 2026-09-08 (NESDR) and 2026-09-11 (Airspy).
+/// stalled and its source is re-opened in process. An SDR that drops off USB
+/// (and comes back) leaves libairspy / librtlsdr silently idle: the process
+/// stays "active" while decoding nothing, which is exactly what happened
+/// 2026-09-08 (NESDR) and 2026-09-11 (Airspy).
 pub const STALL_TIMEOUT: Duration = Duration::from_secs(300);
+/// If re-opening hasn't produced samples for this long, exit so systemd
+/// restarts the whole process (last resort against wedged driver state).
+pub const STALL_GIVE_UP: Duration = Duration::from_secs(1800);
 
-/// Receivers whose block counter has not advanced for `STALL_TIMEOUT`.
-/// Checked from a watchdog thread; empty means healthy.
+/// Receivers that are not delivering: `receivers` = open but no samples for
+/// `STALL_TIMEOUT` (being re-opened), `unavailable` = device could not be
+/// opened (supervisor retrying every `REOPEN_INTERVAL`). Both empty = healthy.
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct Stalled {
     pub receivers: Vec<String>,
+    pub unavailable: Vec<String>,
 }
 
 fn make_source(rc: &ReceiverConfig) -> Result<Box<dyn IqSource>> {
@@ -133,8 +159,7 @@ impl Runtime {
         let family_interval = cfg.chirps.as_ref().map(|c| c.min_family_interval_s).unwrap_or(0.0);
         let mut receivers = Vec::new();
         for rc in &cfg.receivers {
-            let source = make_source(rc)?;
-            let source_desc = source.describe();
+            let source_desc = make_source(rc)?.describe();
             let (block_tx, block_rx) = mpsc::sync_channel::<Block>(64);
             let counters = Arc::new(SourceCounters::default());
             let stats = Arc::new(Mutex::new((PipelineStats::default(), 0.0f64)));
@@ -237,10 +262,43 @@ impl Runtime {
                 }
             })?;
             let center = Arc::new(std::sync::atomic::AtomicU64::new(rc.centers()[0].to_bits()));
-            let running = source.start(BlockSink::new(block_tx, counters.clone(), center)).with_context(|| format!("start receiver {}", rc.name))?;
-            eprintln!("receiver {}: {}", rc.name, source_desc);
             let watchdog = !matches!(rc.kind, ReceiverKind::File { .. });
-            receivers.push(ReceiverHandle { name: rc.name.clone(), source_desc, sample_rate: rc.sample_rate, centers_hz: rc.centers(), counters, watchdog, stats, running: Some(running) });
+            // Source supervisor. A device that is missing at startup (or that
+            // vanished and came back on USB) must not take the other receivers
+            // down with it: open failures are retried, and the watchdog asks for
+            // an in-process re-open instead of killing the service.
+            let restart = Arc::new(AtomicBool::new(false));
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let open = Arc::new(AtomicBool::new(false));
+            let supervisor = {
+                let (rc, name, counters, restart, shutdown, open) = (rc.clone(), rc.name.clone(), counters.clone(), restart.clone(), shutdown.clone(), open.clone());
+                let (block_tx, center) = (block_tx.clone(), center.clone());
+                std::thread::Builder::new().name(format!("src-{name}")).spawn(move || {
+                    while !shutdown.load(Ordering::Relaxed) {
+                        let attempt = make_source(&rc).and_then(|s| {
+                            let desc = s.describe();
+                            s.start(BlockSink::new(block_tx.clone(), counters.clone(), center.clone())).map(|r| (r, desc))
+                        });
+                        match attempt {
+                            Ok((running, desc)) => {
+                                eprintln!("receiver {name}: {desc}");
+                                restart.store(false, Ordering::Relaxed);
+                                open.store(true, Ordering::Relaxed);
+                                sleep_until(Duration::from_secs(u64::MAX / 4), &|| restart.load(Ordering::Relaxed) || shutdown.load(Ordering::Relaxed));
+                                eprintln!("receiver {name}: stopping source ({})", if shutdown.load(Ordering::Relaxed) { "shutdown" } else { "watchdog restart" });
+                                open.store(false, Ordering::Relaxed);
+                                running.stop();
+                            }
+                            Err(e) => {
+                                eprintln!("receiver {name}: {e:#}; retrying in {REOPEN_INTERVAL:?}");
+                                sleep_until(REOPEN_INTERVAL, &|| shutdown.load(Ordering::Relaxed));
+                            }
+                        }
+                    }
+                })?
+            };
+            drop(block_tx);
+            receivers.push(ReceiverHandle { name: rc.name.clone(), source_desc, sample_rate: rc.sample_rate, centers_hz: rc.centers(), counters, watchdog, stats, open, restart, shutdown, supervisor: Some(supervisor) });
         }
         drop(rx_events_tx);
         // merger thread
@@ -263,10 +321,16 @@ impl Runtime {
         Ok(Runtime { receivers, events: events_tx, chirps })
     }
 
-    /// Per-receiver (name, block counter) snapshot for the stall watchdog
-    /// (live SDR receivers only).
+    /// Per-receiver (name, block counter) snapshot for the stall watchdog:
+    /// live SDR receivers whose device is currently open. A receiver whose
+    /// device can't be opened is the supervisor's problem, not a stall.
     pub fn block_counters(&self) -> Vec<(String, u64)> {
-        self.receivers.iter().filter(|r| r.watchdog).map(|r| (r.name.clone(), r.counters.blocks.load(Ordering::Relaxed))).collect()
+        self.receivers.iter().filter(|r| r.watchdog && r.open.load(Ordering::Relaxed)).map(|r| (r.name.clone(), r.counters.blocks.load(Ordering::Relaxed))).collect()
+    }
+
+    /// Live SDR receivers whose device is not open right now.
+    pub fn unavailable(&self) -> Vec<String> {
+        self.receivers.iter().filter(|r| r.watchdog && !r.open.load(Ordering::Relaxed)).map(|r| r.name.clone()).collect()
     }
 
     pub fn status(&self) -> Vec<ReceiverStatus> {
@@ -290,10 +354,20 @@ impl Runtime {
             .collect()
     }
 
+    /// Ask a receiver's supervisor to stop and re-open its source.
+    pub fn request_restart(&self, name: &str) {
+        if let Some(r) = self.receivers.iter().find(|r| r.name == name) {
+            r.restart.store(true, Ordering::Relaxed);
+        }
+    }
+
     pub fn stop(&mut self) {
         for r in &mut self.receivers {
-            if let Some(s) = r.running.take() {
-                s.stop();
+            r.shutdown.store(true, Ordering::Relaxed);
+        }
+        for r in &mut self.receivers {
+            if let Some(t) = r.supervisor.take() {
+                let _ = t.join();
             }
         }
     }

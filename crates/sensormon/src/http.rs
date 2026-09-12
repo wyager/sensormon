@@ -41,10 +41,17 @@ pub fn router(state: AppState) -> Router {
 /// mostly matters for external monitoring).
 async fn health(State(st): State<AppState>) -> Response {
     let stalled = st.stalled.lock().unwrap().clone();
-    if stalled.receivers.is_empty() {
+    if stalled.receivers.is_empty() && stalled.unavailable.is_empty() {
         "ok\n".into_response()
     } else {
-        (axum::http::StatusCode::SERVICE_UNAVAILABLE, format!("stalled: {}\n", stalled.receivers.join(", "))).into_response()
+        let mut parts = Vec::new();
+        if !stalled.receivers.is_empty() {
+            parts.push(format!("stalled: {}", stalled.receivers.join(", ")));
+        }
+        if !stalled.unavailable.is_empty() {
+            parts.push(format!("unavailable: {}", stalled.unavailable.join(", ")));
+        }
+        (axum::http::StatusCode::SERVICE_UNAVAILABLE, format!("{}\n", parts.join("; "))).into_response()
     }
 }
 

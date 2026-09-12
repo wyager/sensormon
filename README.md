@@ -105,12 +105,14 @@ what keeps the writer queue from starving the other receivers), and the store
 keeps at most `max_examples_per_family` (default 50) examples per family.
 Group counts are unaffected by either.
 
-`GET /health` is `200 ok` while every SDR receiver delivers samples and `503
-stalled: <names>` otherwise; a watchdog thread exits the process (status 3)
-after 5 min without samples from any live receiver so `Restart=always` re-opens
-the devices. Needed because an SDR that drops off USB and comes back (the
-fiber-extender link flaps now and then) leaves libairspy/librtlsdr silently
-idle: on 2026-09-11 the service sat "active" for four hours decoding nothing.
+Each receiver's device is owned by a supervisor thread: if it can't be opened
+(unplugged, not yet enumerated) the receiver logs and retries every 30 s while
+the others run; a watchdog re-opens a receiver that has been open but silent
+for 5 min (an SDR that drops off USB and comes back leaves libairspy/librtlsdr
+silently idle — on 2026-09-11 the service sat "active" for four hours decoding
+nothing), and exits the process (status 3, `Restart=always`) if re-opening
+still yields nothing after 30 min. `GET /health` is `200 ok` when every SDR
+receiver is open and delivering, else `503 stalled: …; unavailable: …`.
 
 ### RF survey mode
 
