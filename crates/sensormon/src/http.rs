@@ -19,19 +19,33 @@ pub struct AppState {
     pub runtime: Arc<Mutex<Runtime>>,
     pub events: broadcast::Sender<Arc<Event>>,
     pub chirps: Option<Arc<Mutex<crate::chirps::ChirpStore>>>,
+    /// Maintained by the watchdog thread in `main::run`.
+    pub stalled: Arc<Mutex<crate::runtime::Stalled>>,
 }
 
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/events", get(events))
         .route("/stats", get(stats))
-        .route("/health", get(|| async { "ok" }))
+        .route("/health", get(health))
         .route("/chirps", get(chirps_list))
         .route("/chirps/stats", get(chirps_stats))
         .route("/chirps/groups", get(chirps_groups))
         .route("/chirps/:id", get(chirp_get))
         .route("/chirps/:id/iq", get(chirp_iq))
         .with_state(state)
+}
+
+/// 200 "ok" while every receiver delivers samples; 503 naming the stalled
+/// receivers otherwise (the watchdog exits the process shortly after, so this
+/// mostly matters for external monitoring).
+async fn health(State(st): State<AppState>) -> Response {
+    let stalled = st.stalled.lock().unwrap().clone();
+    if stalled.receivers.is_empty() {
+        "ok\n".into_response()
+    } else {
+        (axum::http::StatusCode::SERVICE_UNAVAILABLE, format!("stalled: {}\n", stalled.receivers.join(", "))).into_response()
+    }
 }
 
 #[derive(serde::Deserialize, Default)]

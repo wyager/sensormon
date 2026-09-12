@@ -143,7 +143,37 @@ fn run(config_path: &std::path::Path) -> Result<()> {
         let events = runtime.events.clone();
         let chirps = runtime.chirps.clone();
         let runtime = std::sync::Arc::new(std::sync::Mutex::new(runtime));
-        let app = http::router(http::AppState { runtime: runtime.clone(), events: events.clone(), chirps });
+        let stalled = std::sync::Arc::new(std::sync::Mutex::new(runtime::Stalled::default()));
+        let app = http::router(http::AppState { runtime: runtime.clone(), events: events.clone(), chirps, stalled: stalled.clone() });
+        // Stall watchdog: an SDR that drops off USB leaves its driver silently idle
+        // and the process would run forever decoding nothing. Exit non-zero so
+        // systemd (Restart=always) brings us back and re-opens the devices.
+        {
+            let runtime = runtime.clone();
+            let stalled = stalled.clone();
+            std::thread::Builder::new().name("watchdog".into()).spawn(move || {
+                let mut last: std::collections::HashMap<String, (u64, std::time::Instant)> = std::collections::HashMap::new();
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    let now = std::time::Instant::now();
+                    let counters = runtime.lock().unwrap().block_counters();
+                    let mut dead = Vec::new();
+                    for (name, blocks) in counters {
+                        let e = last.entry(name.clone()).or_insert((blocks, now));
+                        if blocks != e.0 {
+                            *e = (blocks, now);
+                        } else if now.duration_since(e.1) >= runtime::STALL_TIMEOUT {
+                            dead.push(name);
+                        }
+                    }
+                    *stalled.lock().unwrap() = runtime::Stalled { receivers: dead.clone() };
+                    if !dead.is_empty() {
+                        eprintln!("watchdog: no samples from {} for {:?}; exiting for restart", dead.join(", "), runtime::STALL_TIMEOUT);
+                        std::process::exit(3);
+                    }
+                }
+            }).expect("spawn watchdog");
+        }
         let listener = tokio::net::TcpListener::bind(&cfg.http.bind).await.with_context(|| format!("bind {}", cfg.http.bind))?;
         eprintln!("http: listening on {}", cfg.http.bind);
         // log events to stderr as well, so `journalctl` shows decodes

@@ -54,6 +54,8 @@ struct ReceiverHandle {
     sample_rate: u32,
     centers_hz: Vec<f64>,
     counters: Arc<SourceCounters>,
+    /// File sources legitimately stop at end of file; only live SDRs are watched.
+    watchdog: bool,
     stats: Arc<Mutex<(PipelineStats, f64)>>,
     running: Option<Box<dyn RunningSource>>,
 }
@@ -62,6 +64,19 @@ pub struct Runtime {
     receivers: Vec<ReceiverHandle>,
     pub events: broadcast::Sender<Arc<Event>>,
     pub chirps: Option<Arc<Mutex<crate::chirps::ChirpStore>>>,
+}
+
+/// A receiver that has delivered no samples for this long is considered
+/// stalled. An SDR that drops off USB (and comes back) leaves libairspy /
+/// librtlsdr silently idle: the process stays "active" while decoding nothing,
+/// which is exactly what happened 2026-09-08 (NESDR) and 2026-09-11 (Airspy).
+pub const STALL_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Receivers whose block counter has not advanced for `STALL_TIMEOUT`.
+/// Checked from a watchdog thread; empty means healthy.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct Stalled {
+    pub receivers: Vec<String>,
 }
 
 fn make_source(rc: &ReceiverConfig) -> Result<Box<dyn IqSource>> {
@@ -224,7 +239,8 @@ impl Runtime {
             let center = Arc::new(std::sync::atomic::AtomicU64::new(rc.centers()[0].to_bits()));
             let running = source.start(BlockSink::new(block_tx, counters.clone(), center)).with_context(|| format!("start receiver {}", rc.name))?;
             eprintln!("receiver {}: {}", rc.name, source_desc);
-            receivers.push(ReceiverHandle { name: rc.name.clone(), source_desc, sample_rate: rc.sample_rate, centers_hz: rc.centers(), counters, stats, running: Some(running) });
+            let watchdog = !matches!(rc.kind, ReceiverKind::File { .. });
+            receivers.push(ReceiverHandle { name: rc.name.clone(), source_desc, sample_rate: rc.sample_rate, centers_hz: rc.centers(), counters, watchdog, stats, running: Some(running) });
         }
         drop(rx_events_tx);
         // merger thread
@@ -245,6 +261,12 @@ impl Runtime {
         })?;
         drop(chirp_tx);
         Ok(Runtime { receivers, events: events_tx, chirps })
+    }
+
+    /// Per-receiver (name, block counter) snapshot for the stall watchdog
+    /// (live SDR receivers only).
+    pub fn block_counters(&self) -> Vec<(String, u64)> {
+        self.receivers.iter().filter(|r| r.watchdog).map(|r| (r.name.clone(), r.counters.blocks.load(Ordering::Relaxed))).collect()
     }
 
     pub fn status(&self) -> Vec<ReceiverStatus> {
