@@ -70,7 +70,7 @@ pub struct Runtime {
 /// stalled. An SDR that drops off USB (and comes back) leaves libairspy /
 /// librtlsdr silently idle: the process stays "active" while decoding nothing,
 /// which is exactly what happened 2026-09-08 (NESDR) and 2026-09-11 (Airspy).
-pub const STALL_TIMEOUT: Duration = Duration::from_secs(15);
+pub const STALL_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Receivers whose block counter has not advanced for `STALL_TIMEOUT`.
 /// Checked from a watchdog thread; empty means healthy.

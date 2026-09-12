@@ -107,7 +107,7 @@ Group counts are unaffected by either.
 
 `GET /health` is `200 ok` while every SDR receiver delivers samples and `503
 stalled: <names>` otherwise; a watchdog thread exits the process (status 3)
-after 15 s without samples from any live receiver so `Restart=always` re-opens
+after 5 min without samples from any live receiver so `Restart=always` re-opens
 the devices. Needed because an SDR that drops off USB and comes back (the
 fiber-extender link flaps now and then) leaves libairspy/librtlsdr silently
 idle: on 2026-09-11 the service sat "active" for four hours decoding nothing.
