@@ -4,6 +4,7 @@ pub mod fineoffset;
 pub mod toyota_tpms;
 pub mod wh25;
 pub mod wh31l;
+pub mod wh46;
 pub mod wh51;
 pub mod wh55;
 pub mod ws90;
@@ -62,6 +63,7 @@ pub fn decoders() -> Vec<Box<dyn Decoder>> {
         Box::new(wh55::Wh55Decoder),
         Box::new(wh31l::Wh31lDecoder),
         Box::new(wh25::Wh25Decoder),
+        Box::new(wh46::Wh46Decoder),
         Box::new(toyota_tpms::ToyotaTpmsDecoder),
     ]
 }

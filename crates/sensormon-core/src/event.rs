@@ -82,6 +82,8 @@ pub enum Payload {
     Wh31l(Wh31l),
     #[serde(rename = "Fineoffset-WH25")]
     Wh25(Wh25),
+    #[serde(rename = "Fineoffset-WH46")]
+    Wh46(Wh46),
     #[serde(rename = "Toyota-TPMS")]
     ToyotaTpms(ToyotaTpms),
 }
@@ -95,6 +97,7 @@ impl Payload {
             Payload::Wh55(_) => "Fineoffset-WH55",
             Payload::Wh31l(_) => "FineOffset-WH31L",
             Payload::Wh25(_) => "Fineoffset-WH25",
+            Payload::Wh46(_) => "Fineoffset-WH46",
             Payload::ToyotaTpms(_) => "Toyota-TPMS",
         }
     }
@@ -106,6 +109,7 @@ impl Payload {
             Payload::Wh55(p) => p.id as u32,
             Payload::Wh31l(p) => p.id,
             Payload::Wh25(p) => p.id as u32,
+            Payload::Wh46(p) => p.id,
             Payload::ToyotaTpms(p) => p.id,
         }
     }
@@ -197,6 +201,30 @@ pub enum Wh25Variant {
     Wh25,
     Wh32,
     Wh32b,
+}
+
+/// Fineoffset WH46 / WH46D 7-in-1 indoor air quality sensor (NDIR CO₂,
+/// Sensirion SPS30 particulates, temperature, humidity). Ecowitt's WH45 is
+/// the 5-in-1 sibling with a different family byte and no PM1/PM4.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Wh46 {
+    /// 24-bit id; rtl_433 prints it as 6 hex digits.
+    pub id: u32,
+    /// Battery bars as transmitted, 0..=5; 6 means USB power.
+    pub battery_bars: u8,
+    /// `battery_bars == 6`: running on USB, the bars value is not a level.
+    pub external_power: bool,
+    /// 0.0..=1.0 (`min(bars, 5) / 5`).
+    pub battery_level: f32,
+    pub temperature_c: f32,
+    pub humidity_pct: u8,
+    pub co2_ppm: u16,
+    pub pm1_ug_m3: f32,
+    pub pm2_5_ug_m3: f32,
+    pub pm4_ug_m3: f32,
+    pub pm10_ug_m3: f32,
+    /// Bytes 17–18, constant 0x0190 on every frame seen so far (firmware?).
+    pub unknown: u16,
 }
 
 /// Toyota / Pacific Industries PMV-C210 tire pressure sensor (315 MHz in the US).

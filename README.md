@@ -20,7 +20,7 @@ Running as `sensormon.service` on the `radio` VM with two receivers:
 
 | receiver | SDR | bands | decoders |
 |---|---|---|---|
-| `tower-airspy` | Airspy R2 via USB-over-fiber, 2.5 MS/s | 915 MHz | Fineoffset WS90 / WH51 / WH55 / WH57 / WH25 |
+| `tower-airspy` | Airspy R2 via USB-over-fiber, 2.5 MS/s | 915 MHz | Fineoffset WS90 / WH51 / WH55 / WH57 / WH25 / WH46 |
 | `garage-nesdr` | NESDR SMArt v5, 2.4 MS/s | hops 315 ↔ 433.92 MHz, 15 s dwell | Toyota TPMS (315); Fineoffset (433) |
 
 home2 reads `/events` (`--sensor-source sensormon`, the default).
@@ -36,7 +36,7 @@ vCPU on the N150 VM.
 
 - `crates/sensormon-core` — pure, I/O-free: units, burst detector, extractor,
   FSK demod, framing + decoders (Fineoffset WS90, WH51, WH55, WH57/WH31L,
-  WH25/WH32; Toyota TPMS), typed events, cross-receiver merger, per-receiver
+  WH25/WH32, WH46 air quality; Toyota TPMS), typed events, cross-receiver merger, per-receiver
   `Pipeline` with per-stage timers.
 - `crates/sensormon` — the binary: TOML config, `dlopen`ed libairspy /
   librtlsdr drivers (no link-time dependency), RTL-SDR frequency hopping,
@@ -139,7 +139,7 @@ switching supplies) — the report cross-references the sweeps to flag those.
 
 `sensormon_core::{Event, Reception, Signal, Payload, ...}` are the types to
 import from home automation code (`Payload` is an enum: `Ws90`, `Wh51`,
-`Wh55`, `Wh31l`, `Wh25`, `ToyotaTpms`; fields the sensor can flag as
+`Wh55`, `Wh31l`, `Wh25`, `Wh46`, `ToyotaTpms`; fields the sensor can flag as
 unavailable are `Option`s).
 
 ## Build / deploy
