@@ -218,11 +218,13 @@ pub struct Wh46 {
     pub battery_level: f32,
     pub temperature_c: f32,
     pub humidity_pct: u8,
-    pub co2_ppm: u16,
-    pub pm1_ug_m3: f32,
-    pub pm2_5_ug_m3: f32,
-    pub pm4_ug_m3: f32,
-    pub pm10_ug_m3: f32,
+    /// `None` while the CO₂ sensor is warming up after power-on (sent as 0xFFFF).
+    pub co2_ppm: Option<u16>,
+    /// `None` while the particulate sensor is warming up (sent as all ones, 1638.3).
+    pub pm1_ug_m3: Option<f32>,
+    pub pm2_5_ug_m3: Option<f32>,
+    pub pm4_ug_m3: Option<f32>,
+    pub pm10_ug_m3: Option<f32>,
     /// Bytes 17–18, constant 0x0190 on every frame seen so far (firmware?).
     pub unknown: u16,
 }

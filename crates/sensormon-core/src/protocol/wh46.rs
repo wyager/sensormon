@@ -11,6 +11,10 @@
 //! T: 11-bit temperature (offset 40, ×0.1 °C); H: humidity; B: battery bars
 //! (1 MSB in byte 7, 2 LSBs in byte 9 — 6 means USB power); p/P/q/Q: 14-bit
 //! PM2.5 / PM10 / PM1 / PM4 in 0.1 µg/m³; C: CO₂ in ppm; ??: constant 0x0190.
+//!
+//! For the first transmission(s) after power-on the sensor sends all-ones
+//! for CO₂ (0xFFFF) and every PM channel (0x3FFF = 1638.3) while the SCD30
+//! and SPS30 warm up; those decode as `None`.
 
 use super::{fineoffset, Band, Decoded, Decoder, FrameError, Modulation, FINEOFFSET_BANDS};
 use crate::crc::{crc8_fineoffset, sum8};
@@ -20,6 +24,10 @@ pub const FRAME_LEN: usize = 21;
 
 /// The battery-bars value the sensor sends while on USB power.
 pub const EXTERNAL_POWER_BARS: u8 = 6;
+/// Raw CO₂ value meaning "not available" (sensor warming up).
+pub const CO2_UNAVAILABLE: u16 = 0xffff;
+/// Raw 14-bit PM value meaning "not available" (sensor warming up).
+pub const PM_UNAVAILABLE: u16 = 0x3fff;
 
 pub fn decode_frame(b: &[u8]) -> Result<Wh46, FrameError> {
     if b.len() < FRAME_LEN {
@@ -33,7 +41,11 @@ pub fn decode_frame(b: &[u8]) -> Result<Wh46, FrameError> {
     }
     let temp_raw = ((b[4] as u16 & 0x07) << 8) | b[5] as u16;
     let battery_bars = ((b[7] & 0x40) >> 4) | ((b[9] & 0xc0) >> 6);
-    let pm = |hi: u8, lo: u8| (((hi as u16 & 0x3f) << 8) | lo as u16) as f32 * 0.1;
+    let pm = |hi: u8, lo: u8| {
+        let raw = ((hi as u16 & 0x3f) << 8) | lo as u16;
+        (raw != PM_UNAVAILABLE).then_some(raw as f32 * 0.1)
+    };
+    let co2 = u16::from_be_bytes([b[11], b[12]]);
     Ok(Wh46 {
         id: u32::from_be_bytes([0, b[1], b[2], b[3]]),
         battery_bars,
@@ -41,7 +53,7 @@ pub fn decode_frame(b: &[u8]) -> Result<Wh46, FrameError> {
         battery_level: battery_bars.min(5) as f32 * 0.2,
         temperature_c: (temp_raw as f32 - 400.0) * 0.1,
         humidity_pct: b[6],
-        co2_ppm: u16::from_be_bytes([b[11], b[12]]),
+        co2_ppm: (co2 != CO2_UNAVAILABLE).then_some(co2),
         pm1_ug_m3: pm(b[13], b[14]),
         pm2_5_ug_m3: pm(b[7], b[8]),
         pm4_ug_m3: pm(b[15], b[16]),
@@ -93,11 +105,11 @@ mod tests {
         assert_eq!(p.battery_bars, 5);
         assert!(!p.external_power);
         assert!((p.battery_level - 1.0).abs() < 1e-6);
-        assert!((p.pm2_5_ug_m3 - 5.0).abs() < 1e-4);
-        assert!((p.pm10_ug_m3 - 5.7).abs() < 1e-4);
-        assert_eq!(p.co2_ppm, 779);
-        assert!((p.pm1_ug_m3 - 4.2).abs() < 1e-4);
-        assert!((p.pm4_ug_m3 - 5.4).abs() < 1e-4);
+        assert!((p.pm2_5_ug_m3.unwrap() - 5.0).abs() < 1e-4);
+        assert!((p.pm10_ug_m3.unwrap() - 5.7).abs() < 1e-4);
+        assert_eq!(p.co2_ppm, Some(779));
+        assert!((p.pm1_ug_m3.unwrap() - 4.2).abs() < 1e-4);
+        assert!((p.pm4_ug_m3.unwrap() - 5.4).abs() < 1e-4);
         assert_eq!(p.unknown, 0x0190);
         let mut bad = RTL433_SAMPLE;
         bad[12] ^= 1;
@@ -138,9 +150,9 @@ mod tests {
         assert_eq!(p.battery_bars, 6);
         assert!((p.battery_level - 1.0).abs() < 1e-6);
         assert!((p.temperature_c + 5.0).abs() < 1e-4);
-        assert_eq!(p.co2_ppm, 1450);
-        assert!((p.pm4_ug_m3 - 40.0).abs() < 1e-4);
-        assert!((p.pm10_ug_m3 - 50.0).abs() < 1e-4);
+        assert_eq!(p.co2_ppm, Some(1450));
+        assert!((p.pm4_ug_m3.unwrap() - 40.0).abs() < 1e-4);
+        assert!((p.pm10_ug_m3.unwrap() - 50.0).abs() < 1e-4);
         let low = decode_frame(&make_frame(1, 1, 20.0, 50, 400, [0.0; 4])).unwrap();
         assert_eq!(low.battery_bars, 1);
         assert!((low.battery_level - 0.2).abs() < 1e-6);
@@ -155,8 +167,56 @@ mod tests {
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].raw, RTL433_SAMPLE);
         match &d[0].payload {
-            Payload::Wh46(p) => assert_eq!((p.id, p.co2_ppm), (0x0027f1, 779)),
+            Payload::Wh46(p) => assert_eq!((p.id, p.co2_ppm), (0x0027f1, Some(779))),
             _ => panic!(),
         }
+    }
+
+    /// A frame heard off the air from the WH46D (id 0038e9) on 2026-09-20,
+    /// via the tower Airspy: 71.2 °F / 54 %, CO₂ 496 ppm, USB power.
+    const LIVE_FRAME: [u8; 21] = [
+        70, 0, 56, 233, 98, 106, 54, 64, 51, 128, 54, 1, 240, 0, 46, 0, 53, 1, 144, 219, 82,
+    ];
+
+    #[test]
+    fn decodes_live_frame() {
+        let p = decode_frame(&LIVE_FRAME).unwrap();
+        assert_eq!(p.id, 0x0038e9);
+        assert!(p.external_power);
+        assert!((p.temperature_c - 21.8).abs() < 1e-4);
+        assert_eq!(p.humidity_pct, 54);
+        assert_eq!(p.co2_ppm, Some(496));
+        assert!((p.pm1_ug_m3.unwrap() - 4.6).abs() < 1e-4);
+        assert!((p.pm2_5_ug_m3.unwrap() - 5.1).abs() < 1e-4);
+        assert!((p.pm4_ug_m3.unwrap() - 5.3).abs() < 1e-4);
+        assert!((p.pm10_ug_m3.unwrap() - 5.4).abs() < 1e-4);
+    }
+
+    /// The first frame after power-on: CO₂ 0xFFFF and every PM channel
+    /// 0x3FFF (the values that showed up as 65535 ppm / 1638.3 µg/m³ before
+    /// they were treated as "not available"). Temperature and humidity are
+    /// valid in that frame.
+    #[test]
+    fn warmup_frame_has_no_co2_or_pm() {
+        let mut b = LIVE_FRAME;
+        b[7] = 0x40 | 0x3f; // battery MSB kept, PM2.5 all ones
+        b[8] = 0xff;
+        b[9] = 0x80 | 0x3f; // battery LSBs kept, PM10 all ones
+        b[10] = 0xff;
+        b[11] = 0xff; // CO₂
+        b[12] = 0xff;
+        b[13] = 0x3f; // PM1
+        b[14] = 0xff;
+        b[15] = 0x3f; // PM4
+        b[16] = 0xff;
+        b[19] = crc8_fineoffset(&b[..19]);
+        b[20] = sum8(&b[..20]);
+        let p = decode_frame(&b).unwrap();
+        assert_eq!(p.co2_ppm, None);
+        assert_eq!((p.pm1_ug_m3, p.pm2_5_ug_m3, p.pm4_ug_m3, p.pm10_ug_m3), (None, None, None, None));
+        assert!(p.external_power);
+        assert_eq!(p.battery_bars, 6);
+        assert!((p.temperature_c - 21.8).abs() < 1e-4);
+        assert_eq!(p.humidity_pct, 54);
     }
 }
