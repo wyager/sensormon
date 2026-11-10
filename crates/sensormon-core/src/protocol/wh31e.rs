@@ -5,8 +5,9 @@
 //! ```text
 //! 30 II BT TT HH XX AA
 //! ```
-//! `I` id, `B` battery-low bit + 3-bit channel (0-based), `T` 12-bit
-//! temperature (0.1 °C, offset 400), `H` humidity %.
+//! `I` id; `B` = `1CCC` (a fixed 1, then the 3-bit channel, 0-based); the next
+//! nibble is `0Btt`: battery-low bit and the top 2 bits of the 10-bit
+//! temperature `T` (0.1 °C, offset 400); `H` humidity %.
 
 use super::{fineoffset, Band, Decoded, Decoder, FrameError, Modulation, FINEOFFSET_BANDS};
 use crate::crc::{crc8_fineoffset, sum8};
@@ -24,11 +25,11 @@ pub fn decode_frame(b: &[u8]) -> Result<Wh31e, FrameError> {
     if crc8_fineoffset(&b[..6]) != 0 || sum8(&b[..6]) != b[6] {
         return Err(FrameError::Integrity);
     }
-    let temp_raw = ((b[2] as u16 & 0x0f) << 8) | b[3] as u16;
+    let temp_raw = ((b[2] as u16 & 0x03) << 8) | b[3] as u16;
     Ok(Wh31e {
         id: b[1],
         channel: ((b[2] & 0x70) >> 4) + 1,
-        battery_ok: b[2] & 0x80 == 0,
+        battery_ok: b[2] & 0x04 == 0,
         temperature_c: (temp_raw as f32 - 400.0) * 0.1,
         humidity_pct: b[4],
     })
@@ -70,7 +71,7 @@ mod tests {
         let p = decode_frame(&RTL433_SAMPLE).unwrap();
         assert_eq!(p.id, 0xc3);
         assert_eq!(p.channel, 1);
-        assert!(!p.battery_ok);
+        assert!(p.battery_ok);
         assert!((p.temperature_c - 6.9).abs() < 1e-4);
         assert_eq!(p.humidity_pct, 92);
     }
@@ -81,9 +82,22 @@ mod tests {
         let p = decode_frame(&[0x30, 0xf7, 0x82, 0x54, 0x49, 0xc7, 0x0d]).unwrap();
         assert_eq!(p.id, 0xf7);
         assert_eq!(p.channel, 1);
-        assert!(!p.battery_ok);
+        assert!(p.battery_ok);
         assert!((p.temperature_c - 19.6).abs() < 1e-4);
         assert_eq!(p.humidity_pct, 73);
+    }
+
+    /// The battery-low bit (0x04 of byte 2) sits right above the temperature's
+    /// top bits and must not leak into it.
+    #[test]
+    fn battery_low_bit() {
+        let mut b = vec![0x30, 0xf7, 0x86, 0x54, 0x49];
+        b.push(crc8_fineoffset(&b));
+        b.push(sum8(&b));
+        let p = decode_frame(&b).unwrap();
+        assert!(!p.battery_ok);
+        assert_eq!(p.channel, 1);
+        assert!((p.temperature_c - 19.6).abs() < 1e-4);
     }
 
     #[test]
