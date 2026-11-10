@@ -82,6 +82,8 @@ pub enum Payload {
     Wh31l(Wh31l),
     #[serde(rename = "Fineoffset-WH25")]
     Wh25(Wh25),
+    #[serde(rename = "AmbientWeather-WH31E")]
+    Wh31e(Wh31e),
     #[serde(rename = "Fineoffset-WH46")]
     Wh46(Wh46),
     #[serde(rename = "Toyota-TPMS")]
@@ -97,6 +99,7 @@ impl Payload {
             Payload::Wh55(_) => "Fineoffset-WH55",
             Payload::Wh31l(_) => "FineOffset-WH31L",
             Payload::Wh25(_) => "Fineoffset-WH25",
+            Payload::Wh31e(_) => "AmbientWeather-WH31E",
             Payload::Wh46(_) => "Fineoffset-WH46",
             Payload::ToyotaTpms(_) => "Toyota-TPMS",
         }
@@ -109,6 +112,7 @@ impl Payload {
             Payload::Wh55(p) => p.id as u32,
             Payload::Wh31l(p) => p.id,
             Payload::Wh25(p) => p.id as u32,
+            Payload::Wh31e(p) => p.id as u32,
             Payload::Wh46(p) => p.id,
             Payload::ToyotaTpms(p) => p.id,
         }
@@ -201,6 +205,18 @@ pub enum Wh25Variant {
     Wh25,
     Wh32,
     Wh32b,
+}
+
+/// Fineoffset WH31E / Ecowitt WN31 multi-channel temperature + humidity
+/// sensor (rtl_433 calls it AmbientWeather-WH31E).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Wh31e {
+    pub id: u8,
+    /// The DIP-switch channel, 1..=8.
+    pub channel: u8,
+    pub battery_ok: bool,
+    pub temperature_c: f32,
+    pub humidity_pct: u8,
 }
 
 /// Fineoffset WH46 / WH46D 7-in-1 indoor air quality sensor (NDIR CO₂,
