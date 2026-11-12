@@ -76,6 +76,8 @@ pub enum Payload {
     Ws90(Ws90),
     #[serde(rename = "Fineoffset-WH51")]
     Wh51(Wh51),
+    #[serde(rename = "Fineoffset-WH52")]
+    Wh52(Wh52),
     #[serde(rename = "Fineoffset-WH55")]
     Wh55(Wh55),
     #[serde(rename = "FineOffset-WH31L")]
@@ -96,6 +98,7 @@ impl Payload {
         match self {
             Payload::Ws90(_) => "Fineoffset-WS90",
             Payload::Wh51(_) => "Fineoffset-WH51",
+            Payload::Wh52(_) => "Fineoffset-WH52",
             Payload::Wh55(_) => "Fineoffset-WH55",
             Payload::Wh31l(_) => "FineOffset-WH31L",
             Payload::Wh25(_) => "Fineoffset-WH25",
@@ -109,6 +112,7 @@ impl Payload {
         match self {
             Payload::Ws90(p) => p.id,
             Payload::Wh51(p) => p.id,
+            Payload::Wh52(p) => p.id,
             Payload::Wh55(p) => p.id as u32,
             Payload::Wh31l(p) => p.id,
             Payload::Wh25(p) => p.id as u32,
@@ -153,6 +157,25 @@ pub struct Wh51 {
     pub moisture_pct: u8,
     pub boost: u8,
     pub ad_raw: u16,
+}
+
+/// Fineoffset / Ecowitt WH52 3-in-1 soil probe: moisture, soil temperature
+/// and electrical conductivity.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Wh52 {
+    /// 24-bit id; rtl_433 prints it as 6 hex digits.
+    pub id: u32,
+    /// One AA cell, 20 mV steps.
+    pub battery_mv: u16,
+    /// 0.0..=1.0, mapped from 1.3 V..1.6 V.
+    pub battery_level: f32,
+    pub temperature_c: f32,
+    pub moisture_pct: u8,
+    /// `ec_raw / 25.6` (rtl_433's empirical calibration, ~1 %).
+    pub conductivity_us_cm: f32,
+    /// The 20-bit EC value as transmitted.
+    pub ec_raw: u32,
+    pub boost: u8,
 }
 
 /// Fineoffset WH55 water leak sensor.

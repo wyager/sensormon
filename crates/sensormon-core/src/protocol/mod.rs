@@ -7,6 +7,7 @@ pub mod wh31e;
 pub mod wh31l;
 pub mod wh46;
 pub mod wh51;
+pub mod wh52;
 pub mod wh55;
 pub mod ws90;
 
@@ -61,6 +62,7 @@ pub fn decoders() -> Vec<Box<dyn Decoder>> {
     vec![
         Box::new(ws90::Ws90Decoder),
         Box::new(wh51::Wh51Decoder),
+        Box::new(wh52::Wh52Decoder),
         Box::new(wh55::Wh55Decoder),
         Box::new(wh31l::Wh31lDecoder),
         Box::new(wh25::Wh25Decoder),
